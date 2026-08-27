@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+active_window="$(hyprctl activewindow -j)"
+
+if jq -e '
+  .class == "org.quickshell"
+  and .title == "YouTube Music Player"
+  and any(.tags[]?; sub("\\*$"; "") == "youtube-music-player")
+' <<<"$active_window" >/dev/null 2>&1; then
+  exec omarchy-shell -q io.github.itsdotdev.youtube-music toggleSearch
+else
+  exec omarchy-menu-keybindings
+fi

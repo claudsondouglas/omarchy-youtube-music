@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+runtime_dir="${XDG_RUNTIME_DIR:-/tmp}/omarchy-youtube-music"
+socket="$runtime_dir/mpv.sock"
+state_file="$runtime_dir/state.json"
+queue_file="$runtime_dir/queue.json"
+pid_file="$runtime_dir/mpv.pid"
+mkdir -p "$runtime_dir"
+[[ -e "$queue_file" ]] || printf '[]\n' >"$queue_file"
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf 'Missing dependency: %s\n' "$1" >&2
+    exit 127
+  }
+}
+
+ipc() {
+  [[ -S "$socket" ]] || return 1
+  printf '%s\n' "$1" | socat -T 0.4 - "UNIX-CONNECT:$socket" 2>/dev/null
+}
+
+launch_url() {
+  local url="$1"
+  require mpv
+  if [[ -S "$socket" ]]; then
+    ipc '{"command":["quit"]}' >/dev/null || true
+    for _ in {1..20}; do
+      [[ ! -S "$socket" ]] && break
+      sleep 0.05
+    done
+  fi
+  rm -f -- "$socket"
+  mpv --no-video --force-window=no --input-ipc-server="$socket" \
+    --ytdl-format=bestaudio/best --volume=70 --title='YouTube Music' \
+    "$url" >/dev/null 2>&1 &
+  printf '%s\n' "$!" >"$pid_file"
+}
+
+start_index() {
+  local index="$1"
+  local count track video_id state_tmp
+  count="$(jq 'length' "$queue_file")"
+  (( count > 0 )) || exit 0
+  index=$(( (index % count + count) % count ))
+  track="$(jq -c ".[$index]" "$queue_file")"
+  video_id="$(jq -r '.videoId' <<<"$track")"
+  [[ "$video_id" =~ ^[A-Za-z0-9_-]{6,20}$ ]] || exit 2
+  state_tmp="$runtime_dir/state.json.tmp"
+  jq -c --argjson index "$index" '. + {index: $index}' <<<"$track" >"$state_tmp"
+  mv -- "$state_tmp" "$state_file"
+  launch_url "https://www.youtube.com/watch?v=$video_id"
+}
+
+case "${1:-}" in
+  search)
+    require yt-dlp
+    query="${2:-}"
+    [[ -n "$query" ]] || exit 0
+    yt-dlp --ignore-errors --skip-download --flat-playlist --playlist-end 12 \
+      --print $'%(id)s\t%(title)s\t%(channel)s\t%(duration_string)s\t%(thumbnail)s\t%(live_status)s' \
+      "ytsearch12:${query}"
+    ;;
+  queue)
+    require jq
+    queue_json="${2:-[]}"
+    index="${3:-0}"
+    [[ "$index" =~ ^[0-9]+$ ]] || exit 2
+    queue_tmp="$runtime_dir/queue.json.tmp"
+    jq -ce 'if type == "array" then . else error("queue must be an array") end' <<<"$queue_json" >"$queue_tmp"
+    mv -- "$queue_tmp" "$queue_file"
+    start_index "$index"
+    ;;
+  play)
+    require jq
+    url="${2:-}"
+    [[ "$url" == https://www.youtube.com/watch?v=* || "$url" == https://youtu.be/* ]] || exit 2
+    jq -cn --arg title "${3:-Unknown track}" --arg artist "${4:-YouTube}" \
+      --arg thumbnail "${5:-}" --arg duration "${6:-}" \
+      '{title:$title,artist:$artist,thumbnail:$thumbnail,duration:$duration,index:-1}' >"$state_file"
+    launch_url "$url"
+    ;;
+  next)
+    require jq
+    [[ -s "$queue_file" ]] || exit 0
+    current="$(jq -r '.index // -1' "$state_file" 2>/dev/null || printf '%s' -1)"
+    start_index "$((current + 1))"
+    ;;
+  previous)
+    require jq
+    [[ -s "$queue_file" ]] || exit 0
+    current="$(jq -r '.index // 0' "$state_file" 2>/dev/null || printf '%s' 0)"
+    start_index "$((current - 1))"
+    ;;
+  toggle)
+    require socat
+    ipc '{"command":["cycle","pause"]}' >/dev/null
+    ;;
+  pause)
+    require socat
+    ipc '{"command":["set_property","pause",true]}' >/dev/null
+    ;;
+  resume)
+    require socat
+    ipc '{"command":["set_property","pause",false]}' >/dev/null
+    ;;
+  seek)
+    require socat
+    seconds="${2:-0}"
+    [[ "$seconds" =~ ^-?[0-9]+$ ]] || exit 2
+    ipc "{\"command\":[\"seek\",$seconds,\"relative\"]}" >/dev/null
+    ;;
+  volume)
+    require socat
+    value="${2:-70}"
+    [[ "$value" =~ ^[0-9]+$ ]] || exit 2
+    (( value > 100 )) && value=100
+    ipc "{\"command\":[\"set_property\",\"volume\",$value]}" >/dev/null
+    ;;
+  stop)
+    require socat
+    ipc '{"command":["quit"]}' >/dev/null || true
+    rm -f -- "$socket" "$pid_file"
+    ;;
+  status)
+    require jq
+    if [[ ! -S "$socket" ]]; then
+      if [[ -s "$state_file" ]]; then
+        jq -c --slurpfile queue "$queue_file" '. + {running:false,paused:true,position:0,playbackDuration:0,queue:($queue[0] // [])}' "$state_file"
+      else
+        jq -cn --slurpfile queue "$queue_file" '{running:false,paused:true,position:0,playbackDuration:0,queue:($queue[0] // [])}'
+      fi
+      exit 0
+    fi
+    responses="$(printf '%s\n' \
+      '{"command":["get_property","pause"],"request_id":1}' \
+      '{"command":["get_property","time-pos"],"request_id":2}' \
+      '{"command":["get_property","duration"],"request_id":3}' \
+      | socat -T 0.4 - "UNIX-CONNECT:$socket" 2>/dev/null || true)"
+    if [[ -s "$state_file" ]]; then
+      jq -sc --slurpfile track "$state_file" --slurpfile queue "$queue_file" '($track[0] // {}) + {
+        running:true,
+        paused:((map(select(.request_id == 1))[0].data) // false),
+        position:((map(select(.request_id == 2))[0].data) // 0),
+        playbackDuration:((map(select(.request_id == 3))[0].data) // 0),
+        queue:($queue[0] // [])
+      }' <<<"$responses"
+    else
+      jq -sc '{running:true,paused:((map(select(.request_id == 1))[0].data)//false),position:((map(select(.request_id == 2))[0].data)//0),playbackDuration:((map(select(.request_id == 3))[0].data)//0)}' <<<"$responses"
+    fi
+    ;;
+  *)
+    printf 'Usage: youtube-music <search QUERY|queue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS|volume 0-100|stop|status>\n' >&2
+    exit 2
+    ;;
+esac
