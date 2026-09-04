@@ -7,6 +7,7 @@ socket="$runtime_dir/mpv.sock"
 state_file="$runtime_dir/state.json"
 queue_file="$runtime_dir/queue.json"
 pid_file="$runtime_dir/mpv.pid"
+fail_file="$runtime_dir/fail_streak"
 mkdir -p "$runtime_dir"
 [[ -e "$queue_file" ]] || printf '[]\n' >"$queue_file"
 
@@ -75,8 +76,63 @@ launch_url() {
   mpv --no-video --force-window=no --input-ipc-server="$socket" \
     --ytdl-format=bestaudio/best --volume=70 --title='YouTube Music' \
     "$url" >/dev/null 2>&1 &
-  printf '%s\n' "$!" >"$pid_file"
+  mpv_pid=$!
+  printf '%s\n' "$mpv_pid" >"$pid_file"
+  watch_track "$mpv_pid"
   flock -u 9
+}
+
+# End-of-track watcher. Without it the queue never advances on its own: mpv
+# exits when the song ends and nothing called `next`, so every track stopped at
+# its end and a 40-track queue played exactly one song.
+watch_track() {
+  local mpv_pid="$1"
+  (
+    # Drop the lock fd: this subshell lives for the whole song, and inheriting
+    # the open descriptor would hold launch_url's lock for all that time.
+    exec 9>&-
+    local started played current count index streak
+    started="$(date +%s)"
+    while is_our_mpv "$mpv_pid"; do sleep 1; done
+    played=$(( $(date +%s) - started ))
+
+    # Claim the advance under the lock: if the pid file is no longer ours, the
+    # user changed track (another launch, or `stop`) -- this is not an
+    # end-of-song, and there is nothing to advance.
+    exec 8>"$runtime_dir/launch.lock"
+    flock 8
+    current=""
+    [[ -r "$pid_file" ]] && current="$(<"$pid_file")"
+    if [[ "$current" != "$mpv_pid" ]]; then
+      exit 0
+    fi
+    rm -f -- "$pid_file"
+    flock -u 8
+
+    # A quick death is not an end-of-song, it is a track that never played
+    # (yt-dlp could not resolve it, video removed, region locked). Skip it
+    # anyway, but with a cap: without one a bad run would race through the whole
+    # queue in seconds. A long play resets the counter.
+    if (( played < 10 )); then
+      streak=$(( $(cat "$fail_file" 2>/dev/null || printf 0) + 1 ))
+      if (( streak >= 3 )); then
+        rm -f -- "$fail_file"
+        exit 0
+      fi
+      printf '%s\n' "$streak" >"$fail_file"
+    else
+      rm -f -- "$fail_file"
+    fi
+
+    # Automatic advance does not wrap around: it stops at the last item. The
+    # `next` button still wraps (start_index is modular) -- there the user asked
+    # for it.
+    count="$(jq 'length' "$queue_file" 2>/dev/null || printf 0)"
+    index="$(jq -r '.index // -1' "$state_file" 2>/dev/null || printf -- -1)"
+    if (( count > 0 )) && (( index >= 0 )) && (( index + 1 < count )); then
+      exec bash "$0" next
+    fi
+  ) >/dev/null 2>&1 &
 }
 
 start_index() {
