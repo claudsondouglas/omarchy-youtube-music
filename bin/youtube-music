@@ -22,21 +22,61 @@ ipc() {
   printf '%s\n' "$1" | socat -T 0.4 - "UNIX-CONNECT:$socket" 2>/dev/null
 }
 
+# Confirms the pid still belongs to one of *our* mpv instances before signalling
+# it. Pids are recycled by the kernel, and killing an unrelated process would be
+# far worse than leaving an orphan behind.
+is_our_mpv() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Braces so that 2>/dev/null also swallows the REDIRECTION error: the process
+  # can die between the kill -0 and the read, and then it is the shell itself
+  # that complains about the missing /proc entry, before `tr` even runs.
+  { tr '\0' ' ' <"/proc/$pid/cmdline" | grep -qF -- "$socket"; } 2>/dev/null
+}
+
 launch_url() {
-  local url="$1"
+  local url="$1" old_pid=""
   require mpv
+
+  # The lock is required: the bar widget and the player fire this script as
+  # separate processes, and without serialising them both read the same mpv.pid
+  # BEFORE either writes its own -- so both kill the old mpv, both start a new
+  # one, and two end up playing at once. With the lock the second caller only
+  # enters after the first has written its pid, and so kills the right process.
+  exec 9>"$runtime_dir/launch.lock"
+  flock 9
+
+  [[ -r "$pid_file" ]] && old_pid="$(<"$pid_file")"
+
   if [[ -S "$socket" ]]; then
     ipc '{"command":["quit"]}' >/dev/null || true
-    for _ in {1..20}; do
-      [[ ! -S "$socket" ]] && break
+  fi
+
+  # The socket only appears after mpv is up, and that depends on yt-dlp
+  # resolving the stream (seconds). Switching tracks inside that window left the
+  # `quit` above with no recipient: the old mpv kept playing underneath the new
+  # one. The pid exists from launch time, so it is the pid that guarantees a
+  # single mpv.
+  if is_our_mpv "$old_pid"; then
+    for _ in {1..40}; do
+      is_our_mpv "$old_pid" || break
       sleep 0.05
     done
+    is_our_mpv "$old_pid" && kill -TERM "$old_pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      is_our_mpv "$old_pid" || break
+      sleep 0.05
+    done
+    is_our_mpv "$old_pid" && kill -KILL "$old_pid" 2>/dev/null || true
   fi
+
   rm -f -- "$socket"
   mpv --no-video --force-window=no --input-ipc-server="$socket" \
     --ytdl-format=bestaudio/best --volume=70 --title='YouTube Music' \
     "$url" >/dev/null 2>&1 &
   printf '%s\n' "$!" >"$pid_file"
+  flock -u 9
 }
 
 start_index() {
