@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Widgets
 import qs.Commons
 import qs.Ui
 
@@ -111,6 +112,14 @@ Item {
     else close()
   }
   function toggle(payloadJson) { opened ? close() : open(payloadJson) }
+
+  // YouTube's hqdefault/sddefault thumbnails are a 4:3 canvas with black bars
+  // above and below the 16:9 frame. A square crop mostly hides them; the
+  // spinning disc does not -- the bars sweep past as two dark wedges. The mq
+  // variant is the same frame with no bars.
+  function discArt(url) {
+    return String(url || "").replace(/\/(hq|sd)?default\.jpg/, "/mqdefault.jpg")
+  }
 
   function formatTime(seconds) {
     var value = Math.max(0, Math.floor(Number(seconds) || 0))
@@ -923,36 +932,133 @@ Item {
               visible: root.showPlayer
               spacing: Style.space(7)
 
+              // Cover and name on one line. The square hero art pushed the
+              // controls and the queue down the panel without telling the user
+              // anything the small cover does not, and the room it gives back
+              // is what lets the title run to two lines.
               Item {
+                id: nowRow
                 width: parent.width
-                height: Math.min(Style.space(220), Math.max(Style.space(180), playerArea.height * 0.42))
+                height: Style.space(84)
 
-                Rectangle {
+                Item {
+                  id: disc
                   width: parent.height
-                  height: parent.height
-                  anchors.horizontalCenter: parent.horizontalCenter
-                  radius: Style.space(9)
-                  color: "#292929"
-                  clip: true
-                  Image {
+                  height: width
+                  anchors.verticalCenter: parent.verticalCenter
+
+                  // A picture disc rather than a black platter: at this size a
+                  // centre label would leave the cover unreadable, so the whole
+                  // record is the artwork. Paused rather than stopped while the
+                  // track is paused, so it picks the angle back up instead of
+                  // snapping to zero.
+                  RotationAnimator on rotation {
+                    from: 0
+                    to: 360
+                    duration: 9000
+                    loops: Animation.Infinite
+                    // Only while the panel is actually up: the widget stays
+                    // loaded with the shell, and a rotation ticking behind a
+                    // closed popup buys nothing.
+                    running: root.opened
+                    paused: !root.playing
+                  }
+
+                  // ClippingRectangle and not a Rectangle with `clip`: a plain
+                  // Item clips to its bounding box, so the artwork kept its
+                  // square corners and the "record" turned as a spinning
+                  // square. This one clips along the radius.
+                  ClippingRectangle {
                     anchors.fill: parent
-                    source: root.currentThumbnail
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
+                    radius: width / 2
+                    color: "#292929"
+                    Image {
+                      anchors.fill: parent
+                      source: root.discArt(root.currentThumbnail)
+                      fillMode: Image.PreserveAspectCrop
+                      asynchronous: true
+                    }
+                  }
+
+                  // Grooves, a rim and a spindle hub. Without them a turning
+                  // circle just reads as a wobbling thumbnail; the rings are
+                  // the whole reason it registers as a record. They alternate
+                  // light and dark so they stay visible over artwork of any
+                  // brightness -- a single light ring vanishes on pale covers.
+                  Rectangle { anchors.centerIn: parent; width: parent.width * 0.9; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#59000000" }
+                  Rectangle { anchors.centerIn: parent; width: parent.width * 0.86; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#40ffffff" }
+                  Rectangle { anchors.centerIn: parent; width: parent.width * 0.74; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#59000000" }
+                  Rectangle { anchors.centerIn: parent; width: parent.width * 0.7; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#40ffffff" }
+                  Rectangle { anchors.centerIn: parent; width: parent.width * 0.56; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#59000000" }
+
+                  // The label and its spindle hole. The label is what sells the
+                  // shape at this size: a disc whose art runs edge to edge and
+                  // centre reads as a coin.
+                  Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.width * 0.34
+                    height: width
+                    radius: width / 2
+                    color: "#141414"
+                    border.width: 1
+                    border.color: "#4dffffff"
+                    Rectangle { anchors.centerIn: parent; width: parent.width * 0.3; height: width; radius: width / 2; color: "#000000" }
                   }
                 }
-              }
 
-              Item {
-                width: parent.width
-                height: Style.space(42)
+                // Sheen and rim, deliberately outside the turning item: the
+                // light in the room does not spin with the record. The sheen
+                // gives the platter its gloss, and the rim is doing real work
+                // -- the clip along the radius is not antialiased, so without a
+                // ring drawn over it the edge of the disc comes out jagged.
+                ClippingRectangle {
+                  anchors.fill: disc
+                  radius: width / 2
+                  color: "transparent"
+                  Rectangle {
+                    anchors.fill: parent
+                    gradient: Gradient {
+                      GradientStop { position: 0.0; color: "#26ffffff" }
+                      GradientStop { position: 0.5; color: "#00ffffff" }
+                      GradientStop { position: 1.0; color: "#1f000000" }
+                    }
+                  }
+                }
+                Rectangle {
+                  anchors.fill: disc
+                  radius: width / 2
+                  color: "transparent"
+                  border.width: Math.max(2, Math.round(width * 0.035))
+                  border.color: "#f0101010"
+                }
 
-                Column {
-                  width: parent.width
+                Item {
+                  anchors.left: disc.right
+                  anchors.leftMargin: Style.space(14)
+                  anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(1)
-                  Text { width: parent.width; text: root.currentTitle; color: root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
-                  Text { width: parent.width; text: root.currentArtist; color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+                  height: titleColumn.height
+
+                  Column {
+                    id: titleColumn
+                    width: parent.width
+                    spacing: Style.space(2)
+                    // Two lines before the ellipsis: nearly every YouTube title
+                    // carries a "(… Sessions Vol. 2)" tail that a single line
+                    // swallows whole.
+                    Text {
+                      width: parent.width
+                      text: root.currentTitle
+                      color: root.ink
+                      font.family: Style.font.menuFamily
+                      font.pixelSize: Style.font.title
+                      font.bold: true
+                      wrapMode: Text.WordWrap
+                      maximumLineCount: 2
+                      elide: Text.ElideRight
+                    }
+                    Text { width: parent.width; text: root.currentArtist; color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+                  }
                 }
               }
 
