@@ -2083,6 +2083,7 @@ Item {
       spacing: Style.space(7)
 
       Rectangle {
+        id: savedThumb
         width: Style.space(34)
         height: width
         radius: Style.space(5)
@@ -2097,8 +2098,9 @@ Item {
         }
       }
 
+      // Measured off the siblings, for the same reason as the queue row.
       Column {
-        width: parent.width - Style.space(107)
+        width: parent.width - savedThumb.width - savedRemoveSlot.width - savedDuration.width - parent.spacing * 3
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(2)
         Text {
@@ -2121,6 +2123,7 @@ Item {
       }
 
       Item {
+        id: savedRemoveSlot
         width: Style.space(22)
         height: parent.height
 
@@ -2144,6 +2147,7 @@ Item {
       }
 
       Text {
+        id: savedDuration
         width: Style.space(38)
         text: root.durationLabel(savedRow.modelData.duration, savedRow.modelData.isLive === true)
         color: savedRow.modelData.isLive === true ? root.accent : root.muted
@@ -2253,6 +2257,7 @@ Item {
       spacing: Style.space(7)
 
       Rectangle {
+        id: rowThumb
         width: expanded ? Style.space(40) : Style.space(30)
         height: width
         radius: Style.space(5)
@@ -2262,8 +2267,11 @@ Item {
         Image { anchors.fill: parent; source: trackRow.thumbnail; fillMode: Image.PreserveAspectCrop; asynchronous: true }
       }
 
+      // Measured off the siblings rather than counted by hand: the constant
+      // that used to sit here was 8px short, which pushed the duration past
+      // the row's right edge and let the list clip the last digit off it.
       Column {
-        width: parent.width - (expanded ? Style.space(113) : Style.space(103))
+        width: parent.width - rowThumb.width - rowMixSlot.width - rowDuration.width - parent.spacing * 3
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(2)
         Text {
@@ -2280,6 +2288,7 @@ Item {
       }
 
       Item {
+        id: rowMixSlot
         width: Style.space(22)
         height: parent.height
         Text {
@@ -2304,7 +2313,7 @@ Item {
         PanelToolTip { visible: rowMixArea.containsMouse; text: "Start radio from this song" }
       }
 
-      Text { width: Style.space(38); text: root.durationLabel(trackRow.duration, trackRow.isLive); color: trackRow.isLive ? root.accent : root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }
+      Text { id: rowDuration; width: Style.space(38); text: root.durationLabel(trackRow.duration, trackRow.isLive); color: trackRow.isLive ? root.accent : root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }
     }
 
     MouseArea {
