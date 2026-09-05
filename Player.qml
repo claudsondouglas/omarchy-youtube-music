@@ -48,16 +48,62 @@ Item {
   property var closeCallback: null
   property string scriptPath: Qt.resolvedUrl("bin/youtube-music").toString().replace("file://", "")
 
+  // The playlist store as read back from `bin/youtube-music playlists`. A plain
+  // array so the lists below can bind straight to it and repaint the moment a
+  // track is saved.
+  property var playlists: []
+  property var playlistQueue: []
+  property bool homeMode: false
+  property string openPlaylistId: ""
+  property bool playlistPickerOpen: false
+  property bool homeCreating: false
+  property bool pickerCreating: false
+
+  // Which of the three panels fills the body. Home wins whenever nothing is
+  // playing: an empty player showing only "search for something" was a dead
+  // end, and the saved playlists are the one thing worth offering there.
+  readonly property bool showSearch: searchMode
+  readonly property bool showHome: !searchMode && (homeMode || currentTitle === "")
+  readonly property bool showPlayer: !showSearch && !showHome
+
+  readonly property bool currentLiked: playlistHas(playlistById("liked"), currentVideoId)
+  // Drives the bookmark glyph: filled once the track sits in any playlist other
+  // than "Liked songs", which has its own button.
+  readonly property bool currentSaved: {
+    for (var i = 0; i < playlists.length; i++)
+      if (playlists[i].id !== "liked" && playlistHas(playlists[i], currentVideoId)) return true
+    return false
+  }
+  readonly property bool libraryEmpty: {
+    for (var i = 0; i < playlists.length; i++)
+      if (playlists[i].tracks && playlists[i].tracks.length > 0) return false
+    return true
+  }
+
+  focus: true
+  Keys.onPressed: function(event) {
+    if (event.key !== Qt.Key_Escape) return
+    // Escape peels one layer at a time instead of closing the window outright:
+    // dismissing the picker or stepping out of a playlist is what the user
+    // means far more often than "close the player".
+    if (playlistPickerOpen) closePicker()
+    else if (openPlaylistId !== "") openPlaylistId = ""
+    else requestClose()
+    event.accepted = true
+  }
+
   function open(payloadJson) {
     opened = true
     errorMessage = ""
     searchExpanded = searchMode || searchField.text.trim() !== ""
     refreshStatus()
+    loadPlaylists()
   }
 
   function close() {
     searchField.focus = false
     searchExpanded = false
+    closePicker()
     opened = false
   }
   function requestClose() {
@@ -250,6 +296,182 @@ Item {
     requeueProc.running = true
   }
 
+  function loadPlaylists() {
+    if (playlistsProc.running) return
+    playlistsProc.command = ["bash", scriptPath, "playlists"]
+    playlistsProc.running = true
+  }
+
+  function applyPlaylists(raw) {
+    try {
+      var store = JSON.parse(String(raw || "{}"))
+      root.playlists = (store && store.playlists instanceof Array) ? store.playlists : []
+    } catch (error) {
+      console.warn("YouTube Music: invalid playlist store", error)
+    }
+  }
+
+  function playlistById(id) {
+    for (var i = 0; i < playlists.length; i++)
+      if (playlists[i].id === id) return playlists[i]
+    return null
+  }
+
+  function playlistHas(playlist, videoId) {
+    if (!playlist || !playlist.tracks || !isVideoId(videoId)) return false
+    for (var i = 0; i < playlist.tracks.length; i++)
+      if (playlist.tracks[i].videoId === videoId) return true
+    return false
+  }
+
+  function playlistCount(playlist) {
+    var count = (playlist && playlist.tracks) ? playlist.tracks.length : 0
+    return count === 1 ? "1 song" : count + " songs"
+  }
+
+  function currentTrack() {
+    return {
+      videoId: currentVideoId,
+      title: currentTitle,
+      artist: currentArtist,
+      thumbnail: currentThumbnail,
+      duration: currentDuration,
+      isLive: currentIsLive
+    }
+  }
+
+  // Writes go to disk, but the store is only re-read once the process exits --
+  // a whole spawn later. Applying the same change to the local copy first is
+  // what makes the heart fill on the click rather than a beat after it; the
+  // reload that follows is the confirmation.
+  function patchPlaylists(id, videoId, track) {
+    var patched = []
+    for (var i = 0; i < playlists.length; i++) {
+      var entry = playlists[i]
+      if (entry.id !== id) { patched.push(entry); continue }
+      var tracks = (entry.tracks || []).filter(function(item) { return item.videoId !== videoId })
+      if (track) tracks.push(track)
+      patched.push({ id: entry.id, name: entry.name, builtin: entry.builtin === true, tracks: tracks })
+    }
+    playlists = patched
+  }
+
+  function addToPlaylist(id, track) {
+    if (!id || !track || !isVideoId(track.videoId)) return
+    patchPlaylists(id, track.videoId, track)
+    runPlaylistCommand(["playlist-add", id, JSON.stringify(track)])
+  }
+
+  function removeFromPlaylist(id, videoId) {
+    if (!id || !isVideoId(videoId)) return
+    patchPlaylists(id, videoId, null)
+    runPlaylistCommand(["playlist-remove", id, videoId])
+  }
+
+  function toggleLike() {
+    if (!isVideoId(currentVideoId)) return
+    if (currentLiked) removeFromPlaylist("liked", currentVideoId)
+    else addToPlaylist("liked", currentTrack())
+  }
+
+  function togglePlaylistMembership(id) {
+    if (!isVideoId(currentVideoId)) return
+    if (playlistHas(playlistById(id), currentVideoId)) removeFromPlaylist(id, currentVideoId)
+    else addToPlaylist(id, currentTrack())
+  }
+
+  // `withCurrent` is what turns "new playlist" inside the save sheet into one
+  // gesture: the playlist is created with the track already in it, so the shell
+  // never has to hand an id back for a second call.
+  function createPlaylist(name, withCurrent) {
+    var clean = String(name || "").trim()
+    if (!clean) return
+    var args = ["playlist-create", clean]
+    if (withCurrent && isVideoId(currentVideoId)) args.push(JSON.stringify(currentTrack()))
+    runPlaylistCommand(args)
+  }
+
+  function deletePlaylist(id) {
+    if (!id || id === "liked") return
+    if (openPlaylistId === id) openPlaylistId = ""
+    playlists = playlists.filter(function(entry) { return entry.id !== id })
+    runPlaylistCommand(["playlist-delete", id])
+  }
+
+  function openPlaylist(id) {
+    homeMode = true
+    openPlaylistId = id
+  }
+
+  function toggleHome() {
+    collapseSearch()
+    closePicker()
+    openPlaylistId = ""
+    if (homeMode && currentTitle !== "") { homeMode = false; return }
+    homeMode = true
+    if (searchField.text !== "") searchField.text = ""
+    searchMode = false
+    loadPlaylists()
+  }
+
+  function openPicker() {
+    if (!isVideoId(currentVideoId)) return
+    collapseSearch()
+    pickerCreating = false
+    loadPlaylists()
+    playlistPickerOpen = true
+  }
+
+  function closePicker() {
+    playlistPickerOpen = false
+    pickerCreating = false
+  }
+
+  // A playlist becomes the queue as it stands. Unlike selectTrack there is no
+  // mix afterwards: the list is one the user assembled by hand, and swapping it
+  // for a YouTube mix would throw that away.
+  function playPlaylist(id, index) {
+    var playlist = playlistById(id)
+    if (!playlist || !playlist.tracks || playlist.tracks.length === 0) return
+    results.clear()
+    for (var i = 0; i < playlist.tracks.length; i++) {
+      var track = playlist.tracks[i]
+      if (!isVideoId(String(track.videoId || ""))) continue
+      results.append({
+        videoId: String(track.videoId),
+        title: String(track.title || "Untitled"),
+        artist: String(track.artist || "YouTube"),
+        duration: String(track.duration || ""),
+        isLive: track.isLive === true,
+        thumbnail: String(track.thumbnail || "")
+      })
+    }
+    if (results.count === 0) return
+    homeMode = false
+    openPlaylistId = ""
+    searchMode = false
+    playAt(Math.max(0, Math.min(index, results.count - 1)))
+  }
+
+  // Serialised on this side too. The shell locks the file, so the store is
+  // never corrupted, but firing several Processes at a single `Process` element
+  // would simply lose every command after the first.
+  function runPlaylistCommand(args) {
+    var pending = playlistQueue.slice()
+    pending.push(args)
+    playlistQueue = pending
+    drainPlaylistQueue()
+  }
+
+  function drainPlaylistQueue() {
+    if (playlistProc.running || playlistQueue.length === 0) return
+    var pending = playlistQueue.slice()
+    var args = pending.shift()
+    playlistQueue = pending
+    playlistProc.command = ["bash", scriptPath].concat(args)
+    playlistProc.running = true
+  }
+
   function queueJson() {
     var queue = []
     for (var i = 0; i < results.count; i++) {
@@ -282,6 +504,12 @@ Item {
     playerRunning = true
     searchDebounce.stop()
     searchMode = false
+    // The single point where something starts playing, so it is also where the
+    // body switches back to the player. Without this, picking a search result
+    // while home was open would start the track and leave the playlists on
+    // screen.
+    homeMode = false
+    openPlaylistId = ""
     collapseSearch()
     actionProc.command = ["bash", scriptPath, "queue", queueJson(), String(index)]
     actionProc.running = true
@@ -430,6 +658,32 @@ Item {
     }
   }
 
+  Process {
+    id: playlistProc
+    // Deliberately not draining from inside onExited: that would restart the
+    // very Process element whose exit is being handled. The timer lets it
+    // settle first.
+    onExited: playlistDrain.restart()
+  }
+
+  Process {
+    id: playlistsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPlaylists(text)
+    }
+  }
+
+  Timer {
+    id: playlistDrain
+    interval: 30
+    repeat: false
+    onTriggered: {
+      root.drainPlaylistQueue()
+      if (!playlistProc.running) root.loadPlaylists()
+    }
+  }
+
   Timer {
     interval: 900
     running: root.opened
@@ -488,10 +742,39 @@ Item {
               font.pixelSize: Style.font.bodySmall
               font.bold: true
               anchors.left: parent.left
-              anchors.right: searchBox.left
+              anchors.right: libraryButton.left
               anchors.rightMargin: Style.space(10)
               anchors.verticalCenter: parent.verticalCenter
               elide: Text.ElideRight
+            }
+
+            // The way back to the playlists once a track is on air. Without it
+            // home would only ever be reachable on an empty player.
+            Item {
+              id: libraryButton
+              width: Style.space(30)
+              height: Style.space(30)
+              anchors.right: searchBox.left
+              anchors.rightMargin: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+
+              Text {
+                anchors.centerIn: parent
+                text: "󰉹"
+                color: root.showHome ? root.accent : (libraryArea.containsMouse ? root.ink : root.muted)
+                font.family: Style.font.menuFamily
+                // Nudged up to draw at the same ink height as the magnifier
+                // next to it, which fills more of its em box.
+                font.pixelSize: Math.round(Style.font.iconLarge * 1.2)
+              }
+
+              MouseArea {
+                id: libraryArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleHome()
+              }
             }
 
             Rectangle {
@@ -637,7 +920,7 @@ Item {
             Column {
               id: nowPlaying
               anchors.fill: parent
-              visible: root.currentTitle !== "" && !root.searchMode
+              visible: root.showPlayer
               spacing: Style.space(7)
 
               Item {
@@ -720,36 +1003,100 @@ Item {
                 }
 
                 // Deliberately outside the Row: that keeps prev/play/next
-                // centred in the panel while the mix button sits in the corner.
+                // centred in the panel while the save controls sit in the
+                // corners, one on each side.
                 Text {
+                  id: likeGlyph
                   anchors.verticalCenter: parent.verticalCenter
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(2)
-                  text: "󰀃"
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(2)
+                  text: root.currentLiked ? "󰋑" : "󰋕"
                   visible: root.isVideoId(root.currentVideoId)
-                  color: root.mixLoading ? root.accent : (mixArea.containsMouse ? root.ink : root.dim)
+                  color: root.currentLiked ? root.accent : (likeArea.containsMouse ? root.ink : root.dim)
                   font.family: Style.font.menuFamily
-                  // Deliberately larger than its iconLarge neighbours: the
-                  // access-point glyph fills much less of its em box than the
-                  // arrows and the play icon, so at the same nominal size it
-                  // looks smaller -- at 1.7x its drawn height matches the 18px
-                  // arrows. Kept a multiple of the token so it still follows
-                  // the theme.
-                  font.pixelSize: Math.round(Style.font.iconLarge * 1.7)
-                  opacity: root.mixLoading ? 0.6 : 1
-                  SequentialAnimation on scale {
-                    running: root.mixLoading
-                    loops: Animation.Infinite
-                    NumberAnimation { to: 0.86; duration: 480; easing.type: Easing.InOutQuad }
-                    NumberAnimation { to: 1.0; duration: 480; easing.type: Easing.InOutQuad }
+                  // The three corner glyphs are sized to draw at the same ink
+                  // height (~12px next to the 11px arrows), not to the same
+                  // nominal size: each fills a different share of its em box,
+                  // so equal pixelSize renders them visibly unequal. The
+                  // multipliers come from measuring the rendered glyphs.
+                  font.pixelSize: Math.round(Style.font.iconLarge * 1.3)
+
+                  // A short kick on the way in only. The heart is the one
+                  // control in this row that changes stored state rather than
+                  // playback, and the beat is its acknowledgement.
+                  onTextChanged: if (root.currentLiked) likeBeat.restart()
+                  SequentialAnimation {
+                    id: likeBeat
+                    NumberAnimation { target: likeGlyph; property: "scale"; to: 1.3; duration: 110; easing.type: Easing.OutQuad }
+                    NumberAnimation { target: likeGlyph; property: "scale"; to: 1.0; duration: 150; easing.type: Easing.OutBack }
                   }
+
                   MouseArea {
-                    id: mixArea
+                    id: likeArea
                     anchors.fill: parent
                     anchors.margins: -Style.space(8)
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.startMix(root.currentVideoId)
+                    onClicked: root.toggleLike()
+                  }
+                }
+
+                Row {
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(2)
+                  spacing: Style.space(12)
+                  visible: root.isVideoId(root.currentVideoId)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    // Outline when the track is in no playlist, filled when it
+                    // is -- the same empty/full language as the heart beside
+                    // it, rather than one solid shape that always reads as on.
+                    text: root.currentSaved ? "󰃀" : "󰃃"
+                    color: root.currentSaved ? root.accent : (saveArea.containsMouse ? root.ink : root.dim)
+                    font.family: Style.font.menuFamily
+                    // The tallest of the three glyphs by a wide margin, so it
+                    // takes the smallest multiplier to land on the same ink
+                    // height. See the heart above.
+                    font.pixelSize: Math.round(Style.font.iconLarge * 0.9)
+                    MouseArea {
+                      id: saveArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(8)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openPicker()
+                    }
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰀃"
+                    color: root.mixLoading ? root.accent : (mixArea.containsMouse ? root.ink : root.dim)
+                    font.family: Style.font.menuFamily
+                    // Deliberately larger than its iconLarge neighbours: the
+                    // access-point glyph fills much less of its em box than the
+                    // arrows and the play icon, so at the same nominal size it
+                    // looks smaller -- at 1.7x its drawn height matches the 18px
+                    // arrows. Kept a multiple of the token so it still follows
+                    // the theme.
+                    font.pixelSize: Math.round(Style.font.iconLarge * 1.7)
+                    opacity: root.mixLoading ? 0.6 : 1
+                    SequentialAnimation on scale {
+                      running: root.mixLoading
+                      loops: Animation.Infinite
+                      NumberAnimation { to: 0.86; duration: 480; easing.type: Easing.InOutQuad }
+                      NumberAnimation { to: 1.0; duration: 480; easing.type: Easing.InOutQuad }
+                    }
+                    MouseArea {
+                      id: mixArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(8)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.startMix(root.currentVideoId)
+                    }
                   }
                 }
               }
@@ -775,7 +1122,7 @@ Item {
 
             Item {
               anchors.fill: parent
-              visible: root.currentTitle === "" || root.searchMode
+              visible: root.showSearch
 
               Text {
                 anchors.centerIn: parent
@@ -812,9 +1159,650 @@ Item {
                 delegate: TrackRow { expanded: true }
               }
             }
+
+            // Home. The library root, or one playlist opened from it.
+            Item {
+              anchors.fill: parent
+              visible: root.showHome
+
+              Column {
+                anchors.fill: parent
+                spacing: Style.space(7)
+                visible: root.openPlaylistId === ""
+
+                Item {
+                  width: parent.width
+                  height: Style.space(26)
+
+                  Text {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Playlists"
+                    color: root.ink
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Text {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰐕"
+                    color: root.homeCreating ? root.accent : (homeNewArea.containsMouse ? root.ink : root.dim)
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.iconLarge
+
+                    MouseArea {
+                      id: homeNewArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        root.homeCreating = !root.homeCreating
+                        if (root.homeCreating) homeNameInput.begin()
+                      }
+                    }
+                  }
+                }
+
+                NameInput {
+                  id: homeNameInput
+                  width: parent.width
+                  visible: root.homeCreating
+                  // An empty playlist made from home: there is no current track
+                  // to seed it with, unlike the one made from the save sheet.
+                  submit: function(name) { root.createPlaylist(name, false); root.homeCreating = false }
+                  cancel: function() { root.homeCreating = false }
+                }
+
+                ListView {
+                  id: playlistList
+                  width: parent.width
+                  height: parent.height - y
+                  model: root.playlists
+                  clip: true
+                  spacing: Style.space(2)
+                  delegate: PlaylistRow { }
+
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.verticalCenterOffset: Style.space(20)
+                    width: parent.width - Style.space(40)
+                    visible: root.libraryEmpty
+                    text: "Search for something worth hearing,\nthen keep it with 󰋕 or 󰃀"
+                    color: root.muted
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.bodySmall
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                  }
+                }
+              }
+
+              Column {
+                id: playlistDetail
+                anchors.fill: parent
+                spacing: Style.space(7)
+                visible: root.openPlaylistId !== ""
+                readonly property var playlist: root.playlistById(root.openPlaylistId)
+
+                Item {
+                  width: parent.width
+                  height: Style.space(30)
+
+                  Text {
+                    id: backGlyph
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰅁"
+                    color: backArea.containsMouse ? root.ink : root.muted
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.iconLarge
+
+                    MouseArea {
+                      id: backArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.openPlaylistId = ""
+                    }
+                  }
+
+                  Column {
+                    anchors.left: backGlyph.right
+                    anchors.leftMargin: Style.space(9)
+                    anchors.right: detailPlay.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(1)
+                    Text {
+                      width: parent.width
+                      text: playlistDetail.playlist ? playlistDetail.playlist.name : ""
+                      color: root.ink
+                      font.family: Style.font.menuFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      text: root.playlistCount(playlistDetail.playlist)
+                      color: root.muted
+                      font.family: Style.font.menuFamily
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  Text {
+                    id: detailPlay
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "󰐊"
+                    visible: playlistDetail.playlist && playlistDetail.playlist.tracks
+                             && playlistDetail.playlist.tracks.length > 0
+                    color: detailPlayArea.containsMouse ? root.accent : root.ink
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.iconLarge
+
+                    MouseArea {
+                      id: detailPlayArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(7)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.playPlaylist(root.openPlaylistId, 0)
+                    }
+                  }
+                }
+
+                Rectangle { width: parent.width; height: 1; color: "#343434" }
+
+                ListView {
+                  width: parent.width
+                  height: parent.height - y
+                  model: playlistDetail.playlist ? playlistDetail.playlist.tracks : []
+                  clip: true
+                  spacing: Style.space(2)
+                  delegate: PlaylistTrackRow { }
+
+                  Text {
+                    anchors.centerIn: parent
+                    visible: parent.count === 0
+                    text: "Nothing saved here yet"
+                    color: root.muted
+                    font.family: Style.font.menuFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+              }
+            }
           }
         }
       }
+
+      // The save sheet, drawn over the whole card rather than as a menu hanging
+      // off the bookmark: the card is 400px wide and that button sits at
+      // mid-height, so an anchored popup would have nowhere to grow.
+      Rectangle {
+        anchors.fill: parent
+        color: "#cc0f0f0f"
+        visible: root.playlistPickerOpen
+        z: 20
+
+        MouseArea { anchors.fill: parent; onClicked: root.closePicker() }
+
+        Rectangle {
+          anchors.centerIn: parent
+          width: parent.width - Style.space(56)
+          height: Math.min(parent.height - Style.space(64),
+                           Style.space(118) + root.playlists.length * Style.space(40)
+                             + (root.pickerCreating ? Style.space(41) : 0))
+          radius: Style.space(10)
+          color: "#1c1c1c"
+          border.width: 1
+          border.color: "#3a3a3a"
+
+          // Swallows clicks so they do not reach the dimmer behind and close
+          // the sheet the moment the user aims at a row.
+          MouseArea { anchors.fill: parent }
+
+          Column {
+            anchors.fill: parent
+            anchors.margins: Style.space(14)
+            spacing: Style.space(7)
+
+            Text {
+              width: parent.width
+              text: "Save to playlist"
+              color: root.ink
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+
+            Text {
+              width: parent.width
+              text: root.currentTitle
+              color: root.muted
+              font.family: Style.font.menuFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            NameInput {
+              id: pickerNameInput
+              width: parent.width
+              visible: root.pickerCreating
+              // Created with the track already in it, so "new playlist" from
+              // here stays one gesture instead of create-then-tick.
+              submit: function(name) { root.createPlaylist(name, true); root.pickerCreating = false }
+              cancel: function() { root.pickerCreating = false }
+            }
+
+            ListView {
+              id: pickerList
+              width: parent.width
+              height: parent.height - y - pickerNewRow.height - parent.spacing
+              model: root.playlists
+              clip: true
+              spacing: Style.space(2)
+              delegate: PickerRow { }
+            }
+
+            Item {
+              id: pickerNewRow
+              width: parent.width
+              height: Style.space(32)
+
+              Rectangle {
+                anchors.fill: parent
+                radius: Style.space(6)
+                color: pickerNewArea.containsMouse ? "#262626" : "transparent"
+              }
+
+              Row {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(8)
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "󰐕"
+                  color: root.pickerCreating ? root.accent : root.muted
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.iconLarge
+                }
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "New playlist"
+                  color: root.ink
+                  font.family: Style.font.menuFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              MouseArea {
+                id: pickerNewArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  root.pickerCreating = !root.pickerCreating
+                  if (root.pickerCreating) pickerNameInput.begin()
+                }
+              }
+            }
+          }
+        }
+      }
+  }
+
+  // Shared by home and the save sheet: same field, different destination, so
+  // the caller hands in what to do on Enter and on Escape.
+  component NameInput: Rectangle {
+    id: nameInput
+    property var submit: null
+    property var cancel: null
+    height: Style.space(34)
+    radius: Style.space(7)
+    color: root.raised
+    border.width: nameField.activeFocus ? 1 : 0
+    border.color: root.ink
+
+    function begin() {
+      nameField.text = ""
+      nameField.forceActiveFocus()
+    }
+
+    TextInput {
+      id: nameField
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(11)
+      anchors.rightMargin: Style.space(11)
+      verticalAlignment: TextInput.AlignVCenter
+      color: root.ink
+      selectionColor: root.accent
+      selectedTextColor: root.onAccent
+      font.family: Style.font.menuFamily
+      font.pixelSize: Style.font.bodySmall
+      maximumLength: 60
+      clip: true
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: "Playlist name"
+        color: root.muted
+        font: nameField.font
+        visible: !nameField.text
+      }
+
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+          if (nameInput.submit) nameInput.submit(nameField.text)
+          nameField.text = ""
+          event.accepted = true
+        } else if (event.key === Qt.Key_Escape) {
+          nameField.text = ""
+          if (nameInput.cancel) nameInput.cancel()
+          event.accepted = true
+        }
+      }
+    }
+  }
+
+  component PlaylistRow: Rectangle {
+    id: playlistRow
+    required property int index
+    required property var modelData
+    readonly property bool builtin: modelData.builtin === true
+    readonly property int trackCount: modelData.tracks ? modelData.tracks.length : 0
+    // The first track's artwork stands in for a cover. An empty playlist falls
+    // back to a glyph rather than a grey square.
+    readonly property string cover: trackCount > 0 ? String(modelData.tracks[0].thumbnail || "") : ""
+    width: ListView.view ? ListView.view.width : 0
+    height: Style.space(46)
+    radius: Style.space(7)
+    color: (playlistArea.containsMouse || playlistPlayArea.containsMouse || playlistDeleteArea.containsMouse)
+           ? "#222222" : "transparent"
+
+    Row {
+      z: 2
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(4)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.space(7)
+
+      Rectangle {
+        width: Style.space(36)
+        height: width
+        radius: Style.space(5)
+        color: "#292929"
+        clip: true
+        anchors.verticalCenter: parent.verticalCenter
+
+        Image {
+          anchors.fill: parent
+          source: playlistRow.cover
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          visible: playlistRow.cover !== ""
+        }
+
+        Text {
+          anchors.centerIn: parent
+          visible: playlistRow.cover === ""
+          text: playlistRow.builtin ? "󰋑" : "󰲹"
+          color: playlistRow.builtin ? root.accent : root.dim
+          font.family: Style.font.menuFamily
+          font.pixelSize: Math.round(Style.font.bodySmall * 1.5)
+        }
+      }
+
+      Column {
+        width: parent.width - Style.space(103)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(2)
+        Text {
+          width: parent.width
+          text: playlistRow.modelData.name
+          color: root.ink
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+        Text {
+          width: parent.width
+          text: root.playlistCount(playlistRow.modelData)
+          color: root.muted
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Item {
+        width: Style.space(22)
+        height: parent.height
+
+        Text {
+          anchors.centerIn: parent
+          text: "󰆴"
+          color: playlistDeleteArea.containsMouse ? "#ff7a7a" : root.dim
+          font.family: Style.font.menuFamily
+          font.pixelSize: Math.round(Style.font.bodySmall * 1.4)
+          // "Liked songs" cannot be deleted -- the shell refuses it too, so the
+          // button simply never appears rather than failing silently.
+          opacity: (!playlistRow.builtin
+                    && (playlistArea.containsMouse || playlistDeleteArea.containsMouse
+                        || playlistPlayArea.containsMouse)) ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 90 } }
+        }
+
+        MouseArea {
+          id: playlistDeleteArea
+          anchors.fill: parent
+          enabled: !playlistRow.builtin
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.deletePlaylist(playlistRow.modelData.id)
+        }
+      }
+
+      Item {
+        width: Style.space(24)
+        height: parent.height
+
+        Text {
+          anchors.centerIn: parent
+          text: "󰐊"
+          color: playlistPlayArea.containsMouse ? root.accent : root.ink
+          font.family: Style.font.menuFamily
+          font.pixelSize: Math.round(Style.font.bodySmall * 1.5)
+          opacity: (playlistRow.trackCount > 0
+                    && (playlistArea.containsMouse || playlistPlayArea.containsMouse
+                        || playlistDeleteArea.containsMouse)) ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 90 } }
+        }
+
+        MouseArea {
+          id: playlistPlayArea
+          anchors.fill: parent
+          enabled: playlistRow.trackCount > 0
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.playPlaylist(playlistRow.modelData.id, 0)
+        }
+      }
+    }
+
+    MouseArea {
+      id: playlistArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.openPlaylist(playlistRow.modelData.id)
+    }
+  }
+
+  // The rows inside one open playlist. Close to TrackRow, but its model is a
+  // plain JS array off the store rather than the `results` ListModel, and its
+  // hover action removes the track instead of starting a mix.
+  component PlaylistTrackRow: Rectangle {
+    id: savedRow
+    required property int index
+    required property var modelData
+    width: ListView.view ? ListView.view.width : 0
+    height: Style.space(44)
+    radius: Style.space(7)
+    color: (savedArea.containsMouse || savedRemoveArea.containsMouse) ? "#222222" : "transparent"
+
+    Row {
+      z: 2
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(4)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.space(7)
+
+      Rectangle {
+        width: Style.space(34)
+        height: width
+        radius: Style.space(5)
+        color: "#292929"
+        clip: true
+        anchors.verticalCenter: parent.verticalCenter
+        Image {
+          anchors.fill: parent
+          source: String(savedRow.modelData.thumbnail || "")
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+        }
+      }
+
+      Column {
+        width: parent.width - Style.space(107)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(2)
+        Text {
+          width: parent.width
+          text: String(savedRow.modelData.title || "Untitled")
+          color: savedRow.modelData.videoId === root.currentVideoId ? root.accent : root.ink
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+        Text {
+          width: parent.width
+          text: String(savedRow.modelData.artist || "YouTube")
+          color: root.muted
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Item {
+        width: Style.space(22)
+        height: parent.height
+
+        Text {
+          anchors.centerIn: parent
+          text: "󰅖"
+          color: savedRemoveArea.containsMouse ? "#ff7a7a" : root.dim
+          font.family: Style.font.menuFamily
+          font.pixelSize: Math.round(Style.font.bodySmall * 1.3)
+          opacity: (savedArea.containsMouse || savedRemoveArea.containsMouse) ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 90 } }
+        }
+
+        MouseArea {
+          id: savedRemoveArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.removeFromPlaylist(root.openPlaylistId, String(savedRow.modelData.videoId || ""))
+        }
+      }
+
+      Text {
+        width: Style.space(38)
+        text: root.durationLabel(savedRow.modelData.duration, savedRow.modelData.isLive === true)
+        color: savedRow.modelData.isLive === true ? root.accent : root.muted
+        font.family: Style.font.menuFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignRight
+        anchors.verticalCenter: parent.verticalCenter
+      }
+    }
+
+    MouseArea {
+      id: savedArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.playPlaylist(root.openPlaylistId, savedRow.index)
+    }
+  }
+
+  component PickerRow: Rectangle {
+    id: pickerRow
+    required property int index
+    required property var modelData
+    readonly property bool checked: root.playlistHas(modelData, root.currentVideoId)
+    width: ListView.view ? ListView.view.width : 0
+    height: Style.space(38)
+    radius: Style.space(6)
+    color: pickerRowArea.containsMouse ? "#262626" : "transparent"
+
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(6)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(8)
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(18)
+        text: pickerRow.checked ? "󰄬" : (pickerRow.modelData.id === "liked" ? "󰋕" : "󰲹")
+        color: pickerRow.checked ? root.accent : root.dim
+        font.family: Style.font.menuFamily
+        font.pixelSize: Math.round(Style.font.bodySmall * 1.4)
+        horizontalAlignment: Text.AlignHCenter
+      }
+
+      Column {
+        width: parent.width - Style.space(34)
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(1)
+        Text {
+          width: parent.width
+          text: pickerRow.modelData.name
+          color: root.ink
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.bodySmall
+          elide: Text.ElideRight
+        }
+        Text {
+          width: parent.width
+          text: root.playlistCount(pickerRow.modelData)
+          color: root.muted
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+    }
+
+    MouseArea {
+      id: pickerRowArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.togglePlaylistMembership(pickerRow.modelData.id)
+    }
   }
 
   component TrackRow: Rectangle {

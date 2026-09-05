@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.itsdotdev.youtube-music",
   "name": "YouTube Music",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": "itsdotdev",
   "license": "MIT",
   "description": "A compact, keyboard-first YouTube music player for Omarchy.",

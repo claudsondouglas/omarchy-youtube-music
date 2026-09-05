@@ -11,6 +11,12 @@ fail_file="$runtime_dir/fail_streak"
 mkdir -p "$runtime_dir"
 [[ -e "$queue_file" ]] || printf '[]\n' >"$queue_file"
 
+# Playlists live outside XDG_RUNTIME_DIR. Everything else here is session state
+# that should die with the login; a playlist the user built has to survive a
+# reboot.
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-youtube-music"
+playlists_file="$data_dir/playlists.json"
+
 require() {
   command -v "$1" >/dev/null 2>&1 || {
     printf 'Missing dependency: %s\n' "$1" >&2
@@ -21,6 +27,35 @@ require() {
 ipc() {
   [[ -S "$socket" ]] || return 1
   printf '%s\n' "$1" | socat -T 0.4 - "UNIX-CONNECT:$socket" 2>/dev/null
+}
+
+# "Liked songs" is built in: it is created on first access and playlist-delete
+# refuses to remove it, so the heart button always has somewhere to write.
+ensure_playlists() {
+  require jq
+  mkdir -p "$data_dir"
+  [[ -s "$playlists_file" ]] || printf '%s\n' \
+    '{"playlists":[{"id":"liked","name":"Liked songs","builtin":true,"tracks":[]}]}' >"$playlists_file"
+}
+
+# Every mutation reads, transforms and writes under one lock. The bar widget and
+# the player are separate processes hitting the same file, and without it two
+# near-simultaneous saves would both write the version they read before either
+# stored anything -- silently dropping one of the two tracks.
+edit_playlists() {
+  ensure_playlists
+  exec 7>"$data_dir/playlists.lock"
+  flock 7
+  local tmp="$playlists_file.tmp"
+  jq -c "$@" "$playlists_file" >"$tmp"
+  mv -- "$tmp" "$playlists_file"
+  flock -u 7
+}
+
+# A track is only worth storing if it can be played back later, and that comes
+# down to the video id: the rest of the row is metadata for the list.
+valid_track() {
+  jq -e '.videoId | test("^[A-Za-z0-9_-]{11}$")' >/dev/null 2>&1 <<<"${1:-}"
 }
 
 # Confirms the pid still belongs to one of *our* mpv instances before signalling
@@ -278,8 +313,59 @@ case "${1:-}" in
       jq -sc '{running:true,paused:((map(select(.request_id == 1))[0].data)//false),position:((map(select(.request_id == 2))[0].data)//0),playbackDuration:((map(select(.request_id == 3))[0].data)//0)}' <<<"$responses"
     fi
     ;;
+  playlists)
+    ensure_playlists
+    cat -- "$playlists_file"
+    ;;
+  playlist-create)
+    # Newlines are stripped and the name capped: it is drawn on a single elided
+    # line, and the store is read back as one JSON document per call.
+    name="$(printf '%s' "${2:-}" | tr -d '\n\r' | cut -c1-60)"
+    [[ -n "${name//[[:space:]]/}" ]] || exit 2
+    track="${3:-}"
+    if [[ -n "$track" ]]; then
+      valid_track "$track" || exit 2
+    else
+      track=null
+    fi
+    id="pl$(date +%s%N)"
+    edit_playlists --arg id "$id" --arg name "$name" --argjson track "$track" \
+      '.playlists += [{id: $id, name: $name, builtin: false,
+                       tracks: (if $track == null then [] else [$track] end)}]'
+    printf '%s\n' "$id"
+    ;;
+  playlist-add)
+    playlist_id="${2:-}"
+    track="${3:-}"
+    [[ -n "$playlist_id" ]] || exit 2
+    valid_track "$track" || exit 2
+    # Adding a track that is already there is a no-op, not a duplicate: the
+    # button is a toggle, and a double click must not leave the same song twice.
+    edit_playlists --arg id "$playlist_id" --argjson track "$track" \
+      '.playlists |= map(
+         if .id == $id and (any((.tracks // [])[]; .videoId == $track.videoId) | not)
+         then .tracks = ((.tracks // []) + [$track])
+         else . end)'
+    ;;
+  playlist-remove)
+    playlist_id="${2:-}"
+    video_id="${3:-}"
+    [[ -n "$playlist_id" ]] || exit 2
+    [[ "$video_id" =~ ^[A-Za-z0-9_-]{11}$ ]] || exit 2
+    edit_playlists --arg id "$playlist_id" --arg videoId "$video_id" \
+      '.playlists |= map(
+         if .id == $id
+         then .tracks = ((.tracks // []) | map(select(.videoId != $videoId)))
+         else . end)'
+    ;;
+  playlist-delete)
+    playlist_id="${2:-}"
+    [[ -n "$playlist_id" ]] || exit 2
+    edit_playlists --arg id "$playlist_id" \
+      '.playlists |= map(select(.id != $id or .builtin == true))'
+    ;;
   *)
-    printf 'Usage: youtube-music <search QUERY|mix VIDEO_ID|queue JSON INDEX|requeue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS|volume 0-100|stop|status>\n' >&2
+    printf 'Usage: youtube-music <search QUERY|mix VIDEO_ID|queue JSON INDEX|requeue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS|volume 0-100|stop|status|playlists|playlist-create NAME [TRACK_JSON]|playlist-add ID TRACK_JSON|playlist-remove ID VIDEO_ID|playlist-delete ID>\n' >&2
     exit 2
     ;;
 esac

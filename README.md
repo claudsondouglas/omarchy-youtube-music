@@ -16,6 +16,8 @@ result queue from a native Omarchy overlay.
   the YouTube Music app
 - Opening a song from search replaces "up next" with that song's mix
 - The queue plays through on its own, one track after the next
+- Playlists, including a built-in "Liked songs" fed by the heart button
+- Playlists open from the home screen and play as the queue
 - Minimal top-bar now-playing player with artwork and previous/play/next controls
 - Shared queue and playback state between the bar and full player
 - Keyboard navigation
@@ -68,6 +70,27 @@ track from the search results does it automatically, so "up next" becomes that
 song's mix instead of the leftover search results. Once you are in a mix you
 stay in it: it plays to the end unless you start another mix or search again.
 Tracks already played stay in the list, dimmed, so you can go back to them.
+
+## Playlists
+
+The heart on the left of the transport row keeps the track on air in "Liked
+songs", a playlist that is always there and cannot be deleted. The bookmark next
+to the mix button opens a sheet listing every playlist, where each row toggles
+the track in or out and "New playlist" creates one with that track already in
+it.
+
+The list icon in the header opens the home screen, which is also what you get
+when nothing is playing. It lists the playlists with their covers and track
+counts; a row opens the playlist, the play button on it starts the whole thing,
+and `+` creates an empty one. Inside a playlist, a row plays from that point on
+and the `x` on hover removes the track.
+
+Playing a playlist makes it the queue as it stands: unlike opening a song from
+search, no mix replaces it, because the list is one you built by hand.
+
+Playlists are stored in `${XDG_DATA_HOME:-~/.local/share}/omarchy-youtube-music/playlists.json`
+and survive reboots, unlike the queue and playback state, which live in
+`XDG_RUNTIME_DIR` and go with the session.
 
 ## Notes
 
