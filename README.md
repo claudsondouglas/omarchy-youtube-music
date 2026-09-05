@@ -12,6 +12,10 @@ result queue from a native Omarchy overlay.
 - Audio-only playback through `mpv`
 - Artwork, artist, and duration in the result list
 - Play/pause, previous, and next controls
+- Mix: an endless station built from any track, the way "Start radio" works in
+  the YouTube Music app
+- Opening a song from search replaces "up next" with that song's mix
+- The queue plays through on its own, one track after the next
 - Minimal top-bar now-playing player with artwork and previous/play/next controls
 - Shared queue and playback state between the bar and full player
 - Keyboard navigation
@@ -57,6 +61,13 @@ Inside the player, press Enter to search or play the selected result, use the
 arrow keys to move through results, and press Escape to close it. Click the
 artwork or track title to open the player; the compact bar controls handle
 previous, play/pause, and next.
+
+The `((*))` button next to the transport controls builds a mix around the track
+on air; the same button appears on each row of the list on hover. Picking a
+track from the search results does it automatically, so "up next" becomes that
+song's mix instead of the leftover search results. Once you are in a mix you
+stay in it: it plays to the end unless you start another mix or search again.
+Tracks already played stay in the list, dimmed, so you can go back to them.
 
 ## Notes
 

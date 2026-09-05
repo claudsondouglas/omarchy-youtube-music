@@ -28,6 +28,9 @@ Item {
   property string currentArtist: ""
   property string currentThumbnail: ""
   property string currentDuration: ""
+  property string currentVideoId: ""
+  property bool mixLoading: false
+  property bool mixPrefetching: false
   property bool currentIsLive: false
   property bool playing: false
   property bool playerRunning: false
@@ -120,6 +123,125 @@ Item {
     searchProc.running = true
   }
 
+  // `mix` returns exactly the same TSV as `search`, so all three paths (search,
+  // the mix button and the automatic mix) share this parser. It returns an array
+  // instead of touching `results` directly because the automatic mix has to
+  // inspect the list BEFORE replacing the queue that is on screen -- an empty
+  // mix must not wipe anything out.
+  function parseTracks(raw, limit) {
+    var out = []
+    var lines = String(raw || "").trim().split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      if (!lines[i]) continue
+      var fields = lines[i].split("\t")
+      if (fields.length < 2) continue
+      var videoId = fields[0]
+      if (!isVideoId(videoId)) continue
+      var duration = fields[3] || ""
+      out.push({
+        videoId: videoId,
+        title: fields[1] || "Untitled",
+        artist: fields[2] || "YouTube",
+        duration: duration,
+        isLive: fields[5] === "is_live" || duration.toUpperCase() === "NA",
+        thumbnail: (!fields[4] || fields[4] === "NA")
+          ? "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg"
+          : fields[4]
+      })
+      if (out.length >= limit) break
+    }
+    return out
+  }
+
+  function fillResults(raw, limit) {
+    var tracks = parseTracks(raw, limit)
+    for (var i = 0; i < tracks.length; i++) results.append(tracks[i])
+  }
+
+  // Builds a mix from a seed track and starts playing it right away. YouTube
+  // returns the seed as the first item, so playAt(0) keeps playing what the user
+  // picked and queues the rest behind it.
+  function startMix(videoId) {
+    if (!isVideoId(videoId) || mixLoading) return
+    searchDebounce.stop()
+    searchProc.mode = "mix"
+    searchProc.activeQuery = ""
+    searchProc.pendingQuery = ""
+    searchMode = false
+    searching = true
+    mixLoading = true
+    errorMessage = ""
+    results.clear()
+    selectedIndex = 0
+    collapseSearch()
+    searchProc.command = ["bash", scriptPath, "mix", videoId]
+    searchProc.running = true
+  }
+
+  // The single entry point for "the user picked this row". Picking a SEARCH
+  // result turns into a mix: that is what YouTube Music does when you open a
+  // song -- it builds a mix around it instead of leaving the rest of the search
+  // results in the queue. Picking inside "up next" only jumps to the track, as
+  // that list is already a mix (or a queue the user built), and rebuilding it on
+  // every click would throw away what they were listening to.
+  function selectTrack(index) {
+    if (index < 0 || index >= results.count) return
+    var fromSearch = searchMode
+    var videoId = results.get(index).videoId
+    collapseSearch()
+    selectedIndex = index
+    playAt(index)
+    if (fromSearch) prefetchMix(videoId)
+  }
+
+  // Unlike the mix button (startMix), this interrupts nothing: the chosen track
+  // has been playing since playAt, and yt-dlp takes seconds to resolve the mix.
+  // When it arrives, only the queue is swapped.
+  function prefetchMix(videoId) {
+    if (!isVideoId(videoId) || mixLoading) return
+    // Same pattern as the search pendingQuery: if the user picks another track
+    // before yt-dlp finishes, dropping the new request would leave that track
+    // with no mix at all. Hold it and fire when the current process exits.
+    if (mixProc.running) { mixProc.pending = videoId; return }
+    mixProc.pending = ""
+    mixProc.seed = videoId
+    mixPrefetching = true
+    mixProc.command = ["bash", scriptPath, "mix", videoId]
+    mixProc.running = true
+  }
+
+  // Swaps the queue for the mix while the track on air keeps playing. YouTube
+  // usually returns the seed as the first item, but not always -- hence the
+  // search, and the fallback that puts it in front. Without that currentIndex
+  // would point at a different song and `next` would skip to the wrong one.
+  function applyMix(raw, seed) {
+    var mix = parseTracks(raw, 40)
+    if (mix.length === 0) return
+    var seedAt = -1
+    for (var i = 0; i < mix.length; i++) {
+      if (mix[i].videoId === seed) { seedAt = i; break }
+    }
+    if (seedAt < 0) {
+      mix.unshift({
+        videoId: seed,
+        title: currentTitle,
+        artist: currentArtist,
+        duration: currentDuration,
+        isLive: currentIsLive,
+        thumbnail: currentThumbnail
+      })
+      seedAt = 0
+    }
+    results.clear()
+    for (var j = 0; j < mix.length; j++) results.append(mix[j])
+    currentIndex = seedAt
+    selectedIndex = seedAt
+    // `requeue`, not `queue`: the latter relaunches mpv, which would cut the
+    // audio of the track the user chose seconds ago.
+    requeueProc.command = ["bash", scriptPath, "requeue", queueJson(), String(seedAt)]
+    requeueProc.running = true
+  }
+
   function queueJson() {
     var queue = []
     for (var i = 0; i < results.count; i++) {
@@ -144,6 +266,7 @@ Item {
     currentArtist = track.artist
     currentThumbnail = track.thumbnail
     currentDuration = track.duration
+    currentVideoId = track.videoId
     currentIsLive = track.isLive === true
     position = 0
     playbackDuration = 0
@@ -191,6 +314,7 @@ Item {
       if (status.artist) currentArtist = String(status.artist)
       if (status.thumbnail) currentThumbnail = String(status.thumbnail)
       if (status.duration) currentDuration = String(status.duration)
+      if (status.videoId) currentVideoId = String(status.videoId)
       if (status.isLive !== undefined) currentIsLive = status.isLive === true
       else if (String(status.duration || "").toUpperCase() === "NA") currentIsLive = true
       if (status.index !== undefined) currentIndex = Number(status.index)
@@ -222,10 +346,23 @@ Item {
     property string collected: ""
     property string activeQuery: ""
     property string pendingQuery: ""
+    property string mode: "search"
     stdout: SplitParser { onRead: function(line) { searchProc.collected += line + "\n" } }
     stderr: StdioCollector { id: searchError; waitForEnd: true }
     onStarted: collected = ""
     onExited: function(code) {
+      // A mix does not go through the guards below: they compare the result
+      // against the search field text, which is empty here, and would discard
+      // the whole list.
+      if (mode === "mix") {
+        mode = "search"
+        searching = false
+        mixLoading = false
+        root.fillResults(collected, 40)
+        if (results.count > 0) root.playAt(0)
+        else errorMessage = searchError.text.trim() || "No mix for this track"
+        return
+      }
       var currentQuery = searchField.text.trim()
       if (pendingQuery && pendingQuery !== activeQuery) {
         root.startSearch(pendingQuery)
@@ -240,27 +377,7 @@ Item {
         return
       }
       searching = false
-      var lines = collected.trim().split("\n")
-      for (var i = 0; i < lines.length; i++) {
-        if (!lines[i]) continue
-        var fields = lines[i].split("\t")
-        if (fields.length < 2) continue
-        var videoId = fields[0]
-        if (!root.isVideoId(videoId)) continue
-        var duration = fields[3] || ""
-        var isLive = fields[5] === "is_live" || duration.toUpperCase() === "NA"
-        results.append({
-          videoId: videoId,
-          title: fields[1] || "Untitled",
-          artist: fields[2] || "YouTube",
-          duration: duration,
-          isLive: isLive,
-          thumbnail: (!fields[4] || fields[4] === "NA")
-            ? "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg"
-            : fields[4]
-        })
-        if (results.count >= 10) break
-      }
+      root.fillResults(collected, 10)
       if (code !== 0) errorMessage = searchError.text.trim() || "Search failed"
       else if (results.count === 0) errorMessage = "No tracks found"
       else if (!playerRunning) resultList.forceActiveFocus()
@@ -269,6 +386,31 @@ Item {
 
   Process {
     id: actionProc
+    onExited: refreshStatus()
+  }
+
+  Process {
+    id: mixProc
+    property string collected: ""
+    property string seed: ""
+    property string pending: ""
+    stdout: SplitParser { onRead: function(line) { mixProc.collected += line + "\n" } }
+    onStarted: collected = ""
+    onExited: function(code) {
+      root.mixPrefetching = false
+      var pendingSeed = pending
+      pending = ""
+      if (pendingSeed && pendingSeed !== seed) { root.prefetchMix(pendingSeed); return }
+      // If the user already changed track while yt-dlp was resolving, the mix
+      // arrived late and is no longer valid: swapping the queue now would pull
+      // the rug from under what they just chose.
+      if (code !== 0 || root.currentVideoId !== seed) return
+      root.applyMix(collected, seed)
+    }
+  }
+
+  Process {
+    id: requeueProc
     onExited: refreshStatus()
   }
 
@@ -568,10 +710,44 @@ Item {
                     MouseArea { anchors.fill: parent; anchors.margins: -Style.space(8); cursorShape: Qt.PointingHandCursor; onClicked: { root.collapseSearch(); root.next() } }
                   }
                 }
+
+                // Deliberately outside the Row: that keeps prev/play/next
+                // centred in the panel while the mix button sits in the corner.
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(2)
+                  text: "󰀃"
+                  visible: root.isVideoId(root.currentVideoId)
+                  color: root.mixLoading ? root.green : (mixArea.containsMouse ? root.ink : root.dim)
+                  font.family: Style.font.menuFamily
+                  // Deliberately larger than its iconLarge neighbours: the
+                  // access-point glyph fills much less of its em box than the
+                  // arrows and the play icon, so at the same nominal size it
+                  // looks smaller -- at 1.7x its drawn height matches the 18px
+                  // arrows. Kept a multiple of the token so it still follows
+                  // the theme.
+                  font.pixelSize: Math.round(Style.font.iconLarge * 1.7)
+                  opacity: root.mixLoading ? 0.6 : 1
+                  SequentialAnimation on scale {
+                    running: root.mixLoading
+                    loops: Animation.Infinite
+                    NumberAnimation { to: 0.86; duration: 480; easing.type: Easing.InOutQuad }
+                    NumberAnimation { to: 1.0; duration: 480; easing.type: Easing.InOutQuad }
+                  }
+                  MouseArea {
+                    id: mixArea
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(8)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.startMix(root.currentVideoId)
+                  }
+                }
               }
 
               Rectangle { width: parent.width; height: 1; color: "#343434" }
-              Text { text: "Up next"; color: root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
+              Text { text: (root.mixLoading || root.mixPrefetching) ? "Building mix…" : "Up next"; color: root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
 
               ListView {
                 id: upNextList
@@ -579,6 +755,11 @@ Item {
                 height: parent.height - y
                 model: results
                 clip: true
+                // The track on air now moves down the list as the mix
+                // advances; without following it, it would scroll out of view
+                // after a handful of songs.
+                currentIndex: root.currentIndex
+                onCurrentIndexChanged: if (currentIndex >= 0 && currentIndex < count) positionViewAtIndex(currentIndex, ListView.Contain)
                 spacing: Style.space(2)
                 delegate: TrackRow { }
               }
@@ -618,7 +799,7 @@ Item {
                   if (event.key === Qt.Key_Escape) { root.requestClose(); event.accepted = true }
                   else if (event.key === Qt.Key_Up) { if (root.selectedIndex === 0) searchField.forceActiveFocus(); else root.selectedIndex--; event.accepted = true }
                   else if (event.key === Qt.Key_Down) { root.selectedIndex = Math.min(results.count - 1, root.selectedIndex + 1); event.accepted = true }
-                  else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.playAt(root.selectedIndex); event.accepted = true }
+                  else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.selectTrack(root.selectedIndex); event.accepted = true }
                 }
                 delegate: TrackRow { expanded: true }
               }
@@ -636,14 +817,24 @@ Item {
     required property string duration
     required property bool isLive
     required property string thumbnail
+    required property string videoId
     property bool expanded: false
     width: ListView.view ? ListView.view.width : 0
-    height: (!expanded && index === root.currentIndex) ? 0 : (expanded ? Style.space(50) : Style.space(38))
-    visible: height > 0
+    height: expanded ? Style.space(50) : Style.space(38)
+    // The track on air no longer disappears from the list, and the ones already
+    // played stay behind, only dimmed -- you can go back to them, and you can
+    // still see where you are inside the mix. Skipped for `expanded`, which is
+    // the search list, where "already played" does not exist.
+    opacity: (!expanded && root.currentIndex >= 0 && index < root.currentIndex) ? 0.45 : 1
+    Behavior on opacity { NumberAnimation { duration: 140 } }
     radius: Style.space(7)
-    color: index === root.selectedIndex ? "#292929" : (trackArea.containsMouse ? "#222222" : "transparent")
+    color: index === root.selectedIndex ? "#292929" : ((trackArea.containsMouse || rowMixArea.containsMouse) ? "#222222" : "transparent")
 
+    // z above trackArea (declared later) so the mix button gets the click; the
+    // rest of the Row has no MouseArea, so clicks fall through to trackArea as
+    // before.
     Row {
+      z: 2
       anchors.fill: parent
       anchors.leftMargin: Style.space(4)
       anchors.rightMargin: Style.space(6)
@@ -660,11 +851,34 @@ Item {
       }
 
       Column {
-        width: parent.width - (expanded ? Style.space(91) : Style.space(81))
+        width: parent.width - (expanded ? Style.space(113) : Style.space(103))
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(2)
         Text { width: parent.width; text: trackRow.title; color: trackRow.index === root.currentIndex ? root.green : root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: trackRow.index === root.currentIndex; elide: Text.ElideRight }
         Text { width: parent.width; text: trackRow.artist; color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+      }
+
+      Item {
+        width: Style.space(22)
+        height: parent.height
+        Text {
+          anchors.centerIn: parent
+          text: "󰀃"
+          color: rowMixArea.containsMouse ? root.green : root.dim
+          font.family: Style.font.menuFamily
+          // Same reason as the transport button; 1.7x still fits the
+          // Style.space(22) slot reserved by the Column width beside it.
+          font.pixelSize: Math.round(Style.font.bodySmall * 1.7)
+          opacity: (trackArea.containsMouse || rowMixArea.containsMouse) ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 90 } }
+        }
+        MouseArea {
+          id: rowMixArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.startMix(trackRow.videoId)
+        }
       }
 
       Text { width: Style.space(38); text: root.durationLabel(trackRow.duration, trackRow.isLive); color: trackRow.isLive ? root.green : root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }
@@ -675,7 +889,7 @@ Item {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: { root.collapseSearch(); root.selectedIndex = trackRow.index; root.playAt(trackRow.index) }
+      onClicked: root.selectTrack(trackRow.index)
     }
   }
 }

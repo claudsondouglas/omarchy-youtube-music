@@ -159,6 +159,18 @@ case "${1:-}" in
       --print $'%(id)s\t%(title)s\t%(channel)s\t%(duration_string)s\t%(thumbnail)s\t%(live_status)s' \
       "ytsearch12:${query}"
     ;;
+  mix)
+    # Mix built from a seed track -- "mix" is what YouTube itself calls these RD
+    # playlists. RDAMVM<id> is the one YouTube Music builds; the classic RD<id>
+    # exists too, but stays locked to the seed's artist for far longer, which is
+    # worse for discovering anything new.
+    require yt-dlp
+    video_id="${2:-}"
+    [[ "$video_id" =~ ^[A-Za-z0-9_-]{11}$ ]] || exit 2
+    yt-dlp --ignore-errors --skip-download --flat-playlist --playlist-end 40 \
+      --print $'%(id)s\t%(title)s\t%(channel)s\t%(duration_string)s\t%(thumbnail)s\t%(live_status)s' \
+      "https://www.youtube.com/watch?v=${video_id}&list=RDAMVM${video_id}"
+    ;;
   queue)
     require jq
     queue_json="${2:-[]}"
@@ -168,6 +180,25 @@ case "${1:-}" in
     jq -ce 'if type == "array" then . else error("queue must be an array") end' <<<"$queue_json" >"$queue_tmp"
     mv -- "$queue_tmp" "$queue_file"
     start_index "$index"
+    ;;
+  requeue)
+    # Replace the queue WITHOUT relaunching mpv: the track on air keeps playing,
+    # only "up next" and the index that next/previous count from change. This is
+    # what lets a song opened from search receive its mix a few seconds later
+    # without cutting the audio to rebuild the list.
+    require jq
+    queue_json="${2:-[]}"
+    index="${3:-0}"
+    [[ "$index" =~ ^[0-9]+$ ]] || exit 2
+    queue_tmp="$runtime_dir/queue.json.tmp"
+    jq -ce 'if type == "array" then . else error("queue must be an array") end' <<<"$queue_json" >"$queue_tmp"
+    mv -- "$queue_tmp" "$queue_file"
+    # With no state.json there is no track playing, so no index to fix.
+    if [[ -s "$state_file" ]]; then
+      state_tmp="$runtime_dir/state.json.tmp"
+      jq -c --argjson index "$index" '. + {index: $index}' "$state_file" >"$state_tmp"
+      mv -- "$state_tmp" "$state_file"
+    fi
     ;;
   play)
     require jq
@@ -248,7 +279,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    printf 'Usage: youtube-music <search QUERY|queue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS|volume 0-100|stop|status>\n' >&2
+    printf 'Usage: youtube-music <search QUERY|mix VIDEO_ID|queue JSON INDEX|requeue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS|volume 0-100|stop|status>\n' >&2
     exit 2
     ;;
 esac
