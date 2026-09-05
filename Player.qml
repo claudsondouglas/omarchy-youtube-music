@@ -11,20 +11,28 @@ Item {
   implicitWidth: Style.space(400)
   implicitHeight: Style.space(540)
 
-  readonly property color ink: "#f7f7f7"
-  readonly property color muted: "#a7a7a7"
-  readonly property color dim: "#727272"
-  // The theme accent (theme/colors.toml -> accent) instead of a fixed Spotify
-  // green, so changing the Omarchy theme repaints the player along with the
-  // rest of the shell.
-  readonly property color accent: Color.accent
-  // Text drawn on top of the accent (the search selection). The accent can be
-  // light or dark depending on the theme, so the contrast colour is derived
-  // from its luminance rather than fixed -- fixing it would put white text on
-  // a light accent.
-  readonly property color onAccent: (0.299 * accent.r + 0.587 * accent.g + 0.114 * accent.b) > 0.6 ? "#101010" : "#ffffff"
-  readonly property color surface: "#121212"
-  readonly property color raised: "#242424"
+  // The whole palette comes out of the active Omarchy theme; Theme.qml holds
+  // the derivation, including why the base stays dark whatever the theme does.
+  Theme { id: theme }
+
+  readonly property color ink: theme.ink
+  readonly property color muted: theme.muted
+  readonly property color dim: theme.dim
+  readonly property color accent: theme.accent
+  readonly property color onAccent: theme.onAccent
+  readonly property color surface: theme.base
+  readonly property color raised: theme.raised
+  readonly property color hover: theme.hover
+  readonly property color selected: theme.selected
+  // The square behind a cover that has not loaded (or does not exist). Same
+  // step as a selected row, named for what it actually is.
+  readonly property color artFill: theme.selected
+  readonly property color line: theme.line
+  readonly property color track: theme.track
+  readonly property color card: theme.card
+  readonly property color danger: theme.danger
+  readonly property color scrim: theme.scrim
+  readonly property color sheetScrim: theme.sheetScrim
 
   property bool opened: false
   property bool searching: false
@@ -876,7 +884,7 @@ Item {
         asynchronous: true
         opacity: root.currentThumbnail ? 0.04 : 0
       }
-      Rectangle { anchors.fill: parent; color: "#d6121212" }
+      Rectangle { anchors.fill: parent; color: root.scrim }
       MouseArea { anchors.fill: parent; onClicked: root.collapseSearch() }
 
       Item {
@@ -942,7 +950,7 @@ Item {
               width: collapsedWidth
               height: Style.space(32)
               radius: height / 2
-              color: root.searchExpanded ? root.raised : (searchHitArea.containsMouse ? "#242424" : "transparent")
+              color: (root.searchExpanded || searchHitArea.containsMouse) ? root.raised : "transparent"
               border.width: root.searchExpanded && searchField.activeFocus ? 1 : 0
               border.color: root.ink
               clip: true
@@ -1119,7 +1127,7 @@ Item {
                   ClippingRectangle {
                     anchors.fill: parent
                     radius: width / 2
-                    color: "#292929"
+                    color: root.artFill
                     Image {
                       anchors.fill: parent
                       source: root.discArt(root.currentThumbnail)
@@ -1133,6 +1141,10 @@ Item {
                   // the whole reason it registers as a record. They alternate
                   // light and dark so they stay visible over artwork of any
                   // brightness -- a single light ring vanishes on pale covers.
+                  // These are the only colours in the panel the theme does not
+                  // touch: they are black vinyl and the light falling on it,
+                  // not a surface, and tinting them would only make the record
+                  // stop looking like one.
                   Rectangle { anchors.centerIn: parent; width: parent.width * 0.9; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#59000000" }
                   Rectangle { anchors.centerIn: parent; width: parent.width * 0.86; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#40ffffff" }
                   Rectangle { anchors.centerIn: parent; width: parent.width * 0.74; height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: "#59000000" }
@@ -1249,7 +1261,7 @@ Item {
                     width: parent.width
                     height: seekBar.hot ? Style.space(5) : Style.space(3)
                     radius: height / 2
-                    color: "#555555"
+                    color: root.track
                     anchors.verticalCenter: parent.verticalCenter
                     Behavior on height { NumberAnimation { duration: 90 } }
                     Rectangle {
@@ -1413,7 +1425,7 @@ Item {
                         width: parent.width
                         height: Style.space(3)
                         radius: height / 2
-                        color: "#555555"
+                        color: root.track
                         anchors.verticalCenter: parent.verticalCenter
                         Rectangle {
                           width: parent.width * (root.volume / 100)
@@ -1513,7 +1525,7 @@ Item {
                 }
               }
 
-              Rectangle { width: parent.width; height: 1; color: "#343434" }
+              Rectangle { width: parent.width; height: 1; color: root.line }
               // Not "Up next": the track on air stays in this list, with the
               // ones already played dimmed above it, so the heading has to name
               // the whole queue rather than what follows.
@@ -1552,7 +1564,7 @@ Item {
                 anchors.centerIn: parent
                 visible: root.errorMessage !== ""
                 text: root.errorMessage
-                color: "#ff7a7a"
+                color: root.danger
                 font.family: Style.font.menuFamily
                 font.pixelSize: Style.font.body
               }
@@ -1734,7 +1746,7 @@ Item {
                   }
                 }
 
-                Rectangle { width: parent.width; height: 1; color: "#343434" }
+                Rectangle { width: parent.width; height: 1; color: root.line }
 
                 ListView {
                   width: parent.width
@@ -1764,7 +1776,7 @@ Item {
       // mid-height, so an anchored popup would have nowhere to grow.
       Rectangle {
         anchors.fill: parent
-        color: "#cc0f0f0f"
+        color: root.sheetScrim
         visible: root.playlistPickerOpen
         z: 20
 
@@ -1777,9 +1789,9 @@ Item {
                            Style.space(118) + root.playlists.length * Style.space(40)
                              + (root.pickerCreating ? Style.space(41) : 0))
           radius: Style.space(10)
-          color: "#1c1c1c"
+          color: root.card
           border.width: 1
-          border.color: "#3a3a3a"
+          border.color: root.line
 
           // Swallows clicks so they do not reach the dimmer behind and close
           // the sheet the moment the user aims at a row.
@@ -1836,7 +1848,7 @@ Item {
               Rectangle {
                 anchors.fill: parent
                 radius: Style.space(6)
-                color: pickerNewArea.containsMouse ? "#262626" : "transparent"
+                color: pickerNewArea.containsMouse ? root.hover : "transparent"
               }
 
               Row {
@@ -1942,7 +1954,7 @@ Item {
     height: Style.space(46)
     radius: Style.space(7)
     color: (playlistArea.containsMouse || playlistPlayArea.containsMouse || playlistDeleteArea.containsMouse)
-           ? "#222222" : "transparent"
+           ? root.hover : "transparent"
 
     Row {
       z: 2
@@ -1955,7 +1967,7 @@ Item {
         width: Style.space(36)
         height: width
         radius: Style.space(5)
-        color: "#292929"
+        color: root.artFill
         clip: true
         anchors.verticalCenter: parent.verticalCenter
 
@@ -2006,7 +2018,7 @@ Item {
         Text {
           anchors.centerIn: parent
           text: "󰆴"
-          color: playlistDeleteArea.containsMouse ? "#ff7a7a" : root.dim
+          color: playlistDeleteArea.containsMouse ? root.danger : root.dim
           font.family: Style.font.menuFamily
           font.pixelSize: Math.round(Style.font.bodySmall * 1.4)
           // "Liked songs" cannot be deleted -- the shell refuses it too, so the
@@ -2073,7 +2085,7 @@ Item {
     width: ListView.view ? ListView.view.width : 0
     height: Style.space(44)
     radius: Style.space(7)
-    color: (savedArea.containsMouse || savedRemoveArea.containsMouse) ? "#222222" : "transparent"
+    color: (savedArea.containsMouse || savedRemoveArea.containsMouse) ? root.hover : "transparent"
 
     Row {
       z: 2
@@ -2087,7 +2099,7 @@ Item {
         width: Style.space(34)
         height: width
         radius: Style.space(5)
-        color: "#292929"
+        color: root.artFill
         clip: true
         anchors.verticalCenter: parent.verticalCenter
         Image {
@@ -2130,7 +2142,7 @@ Item {
         Text {
           anchors.centerIn: parent
           text: "󰅖"
-          color: savedRemoveArea.containsMouse ? "#ff7a7a" : root.dim
+          color: savedRemoveArea.containsMouse ? root.danger : root.dim
           font.family: Style.font.menuFamily
           font.pixelSize: Math.round(Style.font.bodySmall * 1.3)
           opacity: (savedArea.containsMouse || savedRemoveArea.containsMouse) ? 1 : 0
@@ -2175,7 +2187,7 @@ Item {
     width: ListView.view ? ListView.view.width : 0
     height: Style.space(38)
     radius: Style.space(6)
-    color: pickerRowArea.containsMouse ? "#262626" : "transparent"
+    color: pickerRowArea.containsMouse ? root.hover : "transparent"
 
     Row {
       anchors.fill: parent
@@ -2244,7 +2256,7 @@ Item {
     opacity: (!expanded && root.currentIndex >= 0 && index < root.currentIndex) ? 0.45 : 1
     Behavior on opacity { NumberAnimation { duration: 140 } }
     radius: Style.space(7)
-    color: index === root.selectedIndex ? "#292929" : ((trackArea.containsMouse || rowMixArea.containsMouse) ? "#222222" : "transparent")
+    color: index === root.selectedIndex ? root.selected : ((trackArea.containsMouse || rowMixArea.containsMouse) ? root.hover : "transparent")
 
     // z above trackArea (declared later) so the mix button gets the click; the
     // rest of the Row has no MouseArea, so clicks fall through to trackArea as
@@ -2261,7 +2273,7 @@ Item {
         width: expanded ? Style.space(40) : Style.space(30)
         height: width
         radius: Style.space(5)
-        color: "#292929"
+        color: root.artFill
         clip: true
         anchors.verticalCenter: parent.verticalCenter
         Image { anchors.fill: parent; source: trackRow.thumbnail; fillMode: Image.PreserveAspectCrop; asynchronous: true }

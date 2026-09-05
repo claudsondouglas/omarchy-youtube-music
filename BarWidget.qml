@@ -16,13 +16,17 @@ BarWidget {
   property bool popupOpen: false
   property string scriptPath: Qt.resolvedUrl("bin/youtube-music").toString().replace("file://", "")
   readonly property bool hasTrack: title !== ""
-  readonly property color foreground: root.bar ? root.bar.barForeground : "#f7f7f7"
+  readonly property color foreground: root.bar ? root.bar.barForeground : Color.bar.text
   readonly property color accent: Color.accent
   readonly property bool opened: popupOpen
   readonly property int popupX: 10
   readonly property int popupY: 38
   readonly property int popupWidth: 400
   readonly property int popupHeight: 540
+
+  // The player's palette: the window behind the panel is painted with it, and
+  // the pill in the bar takes the bar-scoped surfaces from the same place.
+  Theme { id: theme }
 
   implicitWidth: hasTrack ? Style.space(154) : Style.space(30)
   implicitHeight: barSize
@@ -78,9 +82,9 @@ BarWidget {
     width: parent.width
     height: Math.max(Style.space(24), parent.height - Style.space(8))
     radius: Style.space(6)
-    color: root.hasTrack ? "#171717" : "transparent"
+    color: root.hasTrack ? theme.barPill : "transparent"
     border.width: root.hasTrack ? 1 : 0
-    border.color: "#343434"
+    border.color: theme.barLine
 
     Item {
       anchors.fill: parent
@@ -106,7 +110,7 @@ BarWidget {
         width: parent.height
         height: parent.height
         radius: Style.space(4)
-        color: "#2a2a2a"
+        color: theme.barArtFill
         clip: true
         Image { anchors.fill: parent; source: root.thumbnail; fillMode: Image.PreserveAspectCrop; asynchronous: true }
         MouseArea {
@@ -173,7 +177,7 @@ BarWidget {
     id: playerWindow
     title: "YouTube Music Player"
     visible: root.popupOpen
-    color: "#121212"
+    color: theme.base
     implicitWidth: root.popupWidth
     implicitHeight: root.popupHeight
     minimumSize: Qt.size(implicitWidth, implicitHeight)

@@ -24,6 +24,7 @@ result queue from a native Omarchy overlay.
 - Shared queue and playback state between the bar and full player
 - Keyboard navigation
 - Optional top-bar launcher
+- Colors follow the active Omarchy theme, on a panel that stays dark
 
 ## Dependencies
 
@@ -73,6 +74,17 @@ track from the search results does it automatically, so the queue becomes that
 song's mix instead of the leftover search results. Once you are in a mix you
 stay in it: it plays to the end unless you start another mix or search again.
 Tracks already played stay in the list, dimmed, so you can go back to them.
+
+## Theme
+
+The player takes its colors from the active Omarchy theme, so switching themes
+repaints it along with the rest of the shell. The panel itself stays dark
+whatever the theme does: covers run edge to edge on it and the record is drawn
+as a black disc, so a light background would leave the artwork washed out and
+the grooves invisible. A dark theme's background is used as it is, hue
+included; a light one is rebuilt at the same hue with the lightness pinned
+down. The bar pill is the exception -- it lives in the bar and follows the
+bar's own surface, light or dark.
 
 ## Playlists
 
