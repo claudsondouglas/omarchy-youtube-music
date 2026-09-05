@@ -18,7 +18,7 @@ BarWidget {
   property string scriptPath: Qt.resolvedUrl("bin/youtube-music").toString().replace("file://", "")
   readonly property bool hasTrack: title !== ""
   readonly property color foreground: root.bar ? root.bar.barForeground : "#f7f7f7"
-  readonly property color green: "#1ed760"
+  readonly property color accent: Color.accent
   readonly property bool opened: popupOpen
   readonly property int popupX: 10
   readonly property int popupY: 38

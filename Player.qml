@@ -13,7 +13,15 @@ Item {
   readonly property color ink: "#f7f7f7"
   readonly property color muted: "#a7a7a7"
   readonly property color dim: "#727272"
-  readonly property color green: "#1ed760"
+  // The theme accent (theme/colors.toml -> accent) instead of a fixed Spotify
+  // green, so changing the Omarchy theme repaints the player along with the
+  // rest of the shell.
+  readonly property color accent: Color.accent
+  // Text drawn on top of the accent (the search selection). The accent can be
+  // light or dark depending on the theme, so the contrast colour is derived
+  // from its luminance rather than fixed -- fixing it would put white text on
+  // a light accent.
+  readonly property color onAccent: (0.299 * accent.r + 0.587 * accent.g + 0.114 * accent.b) > 0.6 ? "#101010" : "#ffffff"
   readonly property color surface: "#121212"
   readonly property color raised: "#242424"
 
@@ -549,8 +557,8 @@ Item {
                 anchors.rightMargin: Style.space(2)
                 anchors.verticalCenter: parent.verticalCenter
                 color: root.ink
-                selectionColor: root.green
-                selectedTextColor: "#08150c"
+                selectionColor: root.accent
+                selectedTextColor: root.onAccent
                 font.family: Style.font.menuFamily
                 font.pixelSize: Style.font.bodySmall
                 clip: true
@@ -683,7 +691,7 @@ Item {
                     width: parent.width * Math.min(1, root.position / Math.max(1, root.playbackDuration))
                     height: parent.height
                     radius: height / 2
-                    color: root.green
+                    color: root.accent
                   }
                 }
                 Text { width: timeRow.labelWidth; horizontalAlignment: Text.AlignRight; text: root.playbackDuration > 0 ? root.formatTime(root.playbackDuration) : root.durationLabel(root.currentDuration, root.currentIsLive); color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
@@ -701,7 +709,7 @@ Item {
                     MouseArea { anchors.fill: parent; anchors.margins: -Style.space(8); cursorShape: Qt.PointingHandCursor; onClicked: { root.collapseSearch(); root.previous() } }
                   }
                   Rectangle {
-                    width: Style.space(42); height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: root.green; anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(42); height: width; radius: width / 2; color: "transparent"; border.width: 1; border.color: root.accent; anchors.verticalCenter: parent.verticalCenter
                     Text { anchors.centerIn: parent; text: root.playing ? "󰏤" : "󰐊"; color: root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.iconLarge }
                     MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { root.collapseSearch(); root.togglePlayback() } }
                   }
@@ -719,7 +727,7 @@ Item {
                   anchors.rightMargin: Style.space(2)
                   text: "󰀃"
                   visible: root.isVideoId(root.currentVideoId)
-                  color: root.mixLoading ? root.green : (mixArea.containsMouse ? root.ink : root.dim)
+                  color: root.mixLoading ? root.accent : (mixArea.containsMouse ? root.ink : root.dim)
                   font.family: Style.font.menuFamily
                   // Deliberately larger than its iconLarge neighbours: the
                   // access-point glyph fills much less of its em box than the
@@ -854,7 +862,7 @@ Item {
         width: parent.width - (expanded ? Style.space(113) : Style.space(103))
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(2)
-        Text { width: parent.width; text: trackRow.title; color: trackRow.index === root.currentIndex ? root.green : root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: trackRow.index === root.currentIndex; elide: Text.ElideRight }
+        Text { width: parent.width; text: trackRow.title; color: trackRow.index === root.currentIndex ? root.accent : root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: trackRow.index === root.currentIndex; elide: Text.ElideRight }
         Text { width: parent.width; text: trackRow.artist; color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
       }
 
@@ -864,7 +872,7 @@ Item {
         Text {
           anchors.centerIn: parent
           text: "󰀃"
-          color: rowMixArea.containsMouse ? root.green : root.dim
+          color: rowMixArea.containsMouse ? root.accent : root.dim
           font.family: Style.font.menuFamily
           // Same reason as the transport button; 1.7x still fits the
           // Style.space(22) slot reserved by the Column width beside it.
@@ -881,7 +889,7 @@ Item {
         }
       }
 
-      Text { width: Style.space(38); text: root.durationLabel(trackRow.duration, trackRow.isLive); color: trackRow.isLive ? root.green : root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }
+      Text { width: Style.space(38); text: root.durationLabel(trackRow.duration, trackRow.isLive); color: trackRow.isLive ? root.accent : root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }
     }
 
     MouseArea {
