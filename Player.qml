@@ -45,6 +45,11 @@ Item {
   property bool playerRunning: false
   property real position: 0
   property real playbackDuration: 0
+  // 0-100, mirrored from mpv and persisted by the script so it survives the
+  // next track. `scrubbing` holds the status poll off the progress bar while a
+  // drag is in flight.
+  property int volume: 70
+  property bool scrubbing: false
   property alias searchInput: searchField
   property var closeCallback: null
   property string scriptPath: Qt.resolvedUrl("bin/youtube-music").toString().replace("file://", "")
@@ -82,15 +87,31 @@ Item {
   }
 
   focus: true
+  // Only keys the focused item left unhandled reach this far, which is what
+  // keeps the transport shortcuts out of the text fields: a TextInput consumes
+  // space and the horizontal arrows itself.
   Keys.onPressed: function(event) {
-    if (event.key !== Qt.Key_Escape) return
-    // Escape peels one layer at a time instead of closing the window outright:
-    // dismissing the picker or stepping out of a playlist is what the user
-    // means far more often than "close the player".
-    if (playlistPickerOpen) closePicker()
-    else if (openPlaylistId !== "") openPlaylistId = ""
-    else requestClose()
-    event.accepted = true
+    if (event.key === Qt.Key_Escape) {
+      // Escape peels one layer at a time instead of closing the window
+      // outright: dismissing the picker or stepping out of a playlist is what
+      // the user means far more often than "close the player".
+      if (playlistPickerOpen) closePicker()
+      else if (openPlaylistId !== "") openPlaylistId = ""
+      else requestClose()
+      event.accepted = true
+      return
+    }
+    if (playlistPickerOpen) return
+    if (event.key === Qt.Key_Space) {
+      togglePlayback()
+      event.accepted = true
+    } else if (event.key === Qt.Key_Left) {
+      nudge(-5)
+      event.accepted = true
+    } else if (event.key === Qt.Key_Right) {
+      nudge(5)
+      event.accepted = true
+    }
   }
 
   function open(payloadJson) {
@@ -119,6 +140,53 @@ Item {
   // variant is the same frame with no bars.
   function discArt(url) {
     return String(url || "").replace(/\/(hq|sd)?default\.jpg/, "/mqdefault.jpg")
+  }
+
+  // YouTube titles arrive as "DUPE - Creep (Cangaco Sessions Vol. 2 - Deluxe
+  // Edition)" while the artist line right underneath repeats "DUPE". Inside a
+  // mix, where every row shares one artist, that prefix is the first thing on
+  // every row and the song name is exactly what falls off the end -- six rows
+  // that read the same for their first eight characters. Both the prefix and
+  // the version tail come off the strong text and are shown, demoted, where
+  // they carry their weight.
+  function trackParts(title, artist) {
+    var name = String(title || "")
+    // "Artist - Topic" is how YouTube names the auto-generated channel; the
+    // prefix in the title is the bare artist.
+    var lead = String(artist || "").replace(/\s*-\s*Topic\s*$/i, "").trim()
+    if (lead !== "" && name.slice(0, lead.length).toLowerCase() === lead.toLowerCase()) {
+      // Only when a separator follows, so a song whose name simply opens with
+      // the artist's name ("Radiohead Forever") is never cut mid-sentence.
+      var rest = name.slice(lead.length).match(/^\s*[-\u2013\u2014:|\u00b7]\s*(\S.*)$/)
+      if (rest) name = rest[1]
+    }
+    // Everything from the first bracket on is the tail: "(Cangaco Sessions
+    // Vol. 2 - Deluxe Edition)", "(Official Video) ft. Kendrick Lamar". Kept
+    // rather than dropped -- two versions of one song in the same mix are told
+    // apart by precisely this -- but demoted. The brackets themselves go: what
+    // is left is already visibly a subtitle, and a stray ")" from a mid-title
+    // group would be the only thing they added.
+    var tail = ""
+    var split = name.match(/^(.*?\S)\s*[\(\[](.*)$/)
+    if (split) {
+      name = split[1]
+      tail = split[2].replace(/[\(\)\[\]]/g, " ").replace(/\s+/g, " ").trim()
+    }
+    return { name: name, tail: tail }
+  }
+
+  // StyledText markup for a one-line row: the song in the row's own colour and
+  // the version tail behind it in `tailColor`.
+  function trackMarkup(title, artist, tailColor) {
+    var parts = trackParts(title, artist)
+    var markup = escapeMarkup(parts.name)
+    if (parts.tail !== "")
+      markup += " <font color=\"" + tailColor + "\">" + escapeMarkup(parts.tail) + "</font>"
+    return markup
+  }
+
+  function escapeMarkup(value) {
+    return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   }
 
   function formatTime(seconds) {
@@ -533,6 +601,68 @@ Item {
   function next() { runAction("next") }
   function previous() { runAction("previous") }
 
+  // mpv answers a seek within a frame, but the status poll behind it only runs
+  // every 900ms, so for up to one interval the script still reports the old
+  // position. Without the settle window the bar would snap back to where the
+  // track was before the click and only then jump forward.
+  function sendSeek(seconds) {
+    if (seekProc.running) { seekProc.pending = seconds; return }
+    seekProc.pending = -1
+    seekProc.command = ["bash", scriptPath, "seek", String(Math.round(seconds)), "absolute"]
+    seekProc.running = true
+  }
+
+  function seekTo(seconds) {
+    if (!playerRunning || playbackDuration <= 0) return
+    var target = Math.max(0, Math.min(playbackDuration, seconds))
+    position = target
+    seekSettle.restart()
+    sendSeek(target)
+  }
+
+  // Dragging only moves the local position; the seek itself goes out on
+  // release. Each one costs a bash and a socat, and firing per pixel would
+  // queue dozens of them behind a drag.
+  function scrub(fraction) {
+    if (playbackDuration <= 0) return
+    scrubbing = true
+    position = Math.max(0, Math.min(1, fraction)) * playbackDuration
+  }
+
+  function commitScrub(fraction) {
+    scrubbing = false
+    if (playbackDuration <= 0) return
+    seekTo(Math.max(0, Math.min(1, fraction)) * playbackDuration)
+  }
+
+  function nudge(delta) {
+    if (playbackDuration <= 0) return
+    seekTo(position + delta)
+  }
+
+  function sendVolume(value) {
+    if (volumeProc.running) { volumeProc.pending = value; return }
+    volumeProc.pending = -1
+    volumeProc.command = ["bash", scriptPath, "volume", String(value)]
+    volumeProc.running = true
+  }
+
+  function setVolume(value) {
+    var level = Math.max(0, Math.min(100, Math.round(value)))
+    if (level === volume) return
+    volume = level
+    volumeSettle.restart()
+    sendVolume(level)
+  }
+
+  // Mute remembers the level it came from, so the speaker button is a toggle
+  // rather than a one-way trip to zero.
+  property int volumeBeforeMute: 70
+  function toggleMute() {
+    if (volume > 0) { volumeBeforeMute = volume; setVolume(0) }
+    else setVolume(volumeBeforeMute > 0 ? volumeBeforeMute : 70)
+  }
+
   function togglePlayback() {
     if (!playerRunning && results.count > 0) {
       playAt(Math.max(0, selectedIndex))
@@ -553,8 +683,9 @@ Item {
       var status = JSON.parse(String(raw || "{}"))
       playerRunning = status.running === true
       playing = playerRunning && status.paused !== true
-      position = Number(status.position) || 0
+      if (!scrubbing && !seekSettle.running) position = Number(status.position) || 0
       playbackDuration = Number(status.playbackDuration) || 0
+      if (status.volume !== undefined && !volumeSettle.running) volume = Math.max(0, Math.min(100, Math.round(Number(status.volume))))
       if (status.title) currentTitle = String(status.title)
       if (status.artist) currentArtist = String(status.artist)
       if (status.thumbnail) currentThumbnail = String(status.thumbnail)
@@ -658,6 +789,23 @@ Item {
     id: requeueProc
     onExited: refreshStatus()
   }
+
+  Process {
+    id: seekProc
+    // A seek fired while the previous one is still running is not dropped: the
+    // last position asked for is what the user wants, so it is replayed on exit.
+    property real pending: -1
+    onExited: if (pending >= 0) { var target = pending; pending = -1; root.sendSeek(target) }
+  }
+
+  Process {
+    id: volumeProc
+    property real pending: -1
+    onExited: if (pending >= 0) { var level = pending; pending = -1; root.sendVolume(level) }
+  }
+
+  Timer { id: seekSettle; interval: 1400; repeat: false }
+  Timer { id: volumeSettle; interval: 1400; repeat: false }
 
   Process {
     id: statusProc
@@ -1043,12 +1191,14 @@ Item {
                     id: titleColumn
                     width: parent.width
                     spacing: Style.space(2)
-                    // Two lines before the ellipsis: nearly every YouTube title
-                    // carries a "(… Sessions Vol. 2)" tail that a single line
-                    // swallows whole.
+                    readonly property var parts: root.trackParts(root.currentTitle, root.currentArtist)
+                    // Two lines are still allowed: with the artist prefix and
+                    // the version tail moved to the line below, the song name
+                    // fits on one nearly every time, and the second line is
+                    // there for the ones that do not.
                     Text {
                       width: parent.width
-                      text: root.currentTitle
+                      text: titleColumn.parts.name
                       color: root.ink
                       font.family: Style.font.menuFamily
                       font.pixelSize: Style.font.title
@@ -1057,7 +1207,17 @@ Item {
                       maximumLineCount: 2
                       elide: Text.ElideRight
                     }
-                    Text { width: parent.width; text: root.currentArtist; color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+                    // Artist and version share one muted line: which release
+                    // this is matters, but never as much as which song it is.
+                    Text {
+                      width: parent.width
+                      text: titleColumn.parts.tail === "" ? root.currentArtist
+                                                          : root.currentArtist + "  ·  " + titleColumn.parts.tail
+                      color: root.muted
+                      font.family: Style.font.menuFamily
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                    }
                   }
                 }
               }
@@ -1070,17 +1230,57 @@ Item {
                 readonly property bool showsHours: root.position >= 3600 || root.playbackDuration >= 3600
                 readonly property int labelWidth: showsHours ? Style.space(58) : Style.space(34)
                 Text { width: timeRow.labelWidth; text: root.formatTime(root.position); color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                Rectangle {
+                // Click and drag to seek. The drawn bar stays thin, but the
+                // hit area is the full row height: a 3px target is a miss more
+                // often than a hit, and this is the control people reach for
+                // most after play.
+                Item {
+                  id: seekBar
                   width: Math.max(Style.space(40), parent.width - timeRow.labelWidth * 2 - timeRow.spacing * 2)
-                  height: Style.space(3)
-                  radius: height / 2
-                  color: "#555555"
+                  height: timeRow.height
                   anchors.verticalCenter: parent.verticalCenter
+
+                  readonly property bool seekable: root.playbackDuration > 0
+                  readonly property real ratio: seekable ? Math.max(0, Math.min(1, root.position / root.playbackDuration)) : 0
+                  readonly property bool hot: seekable && (seekArea.containsMouse || seekArea.pressed)
+
                   Rectangle {
-                    width: parent.width * Math.min(1, root.position / Math.max(1, root.playbackDuration))
-                    height: parent.height
+                    id: seekTrack
+                    width: parent.width
+                    height: seekBar.hot ? Style.space(5) : Style.space(3)
                     radius: height / 2
+                    color: "#555555"
+                    anchors.verticalCenter: parent.verticalCenter
+                    Behavior on height { NumberAnimation { duration: 90 } }
+                    Rectangle {
+                      width: parent.width * seekBar.ratio
+                      height: parent.height
+                      radius: height / 2
+                      color: root.accent
+                    }
+                  }
+
+                  Rectangle {
+                    width: Style.space(10)
+                    height: width
+                    radius: width / 2
                     color: root.accent
+                    anchors.verticalCenter: parent.verticalCenter
+                    x: seekTrack.width * seekBar.ratio - width / 2
+                    opacity: seekBar.hot ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 90 } }
+                  }
+
+                  MouseArea {
+                    id: seekArea
+                    anchors.fill: parent
+                    enabled: seekBar.seekable
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onPressed: function(mouse) { root.scrub(mouse.x / seekBar.width) }
+                    onPositionChanged: function(mouse) { if (pressed) root.scrub(mouse.x / seekBar.width) }
+                    onReleased: function(mouse) { root.commitScrub(mouse.x / seekBar.width) }
+                    onCanceled: root.scrubbing = false
                   }
                 }
                 Text { width: timeRow.labelWidth; horizontalAlignment: Text.AlignRight; text: root.playbackDuration > 0 ? root.formatTime(root.playbackDuration) : root.durationLabel(root.currentDuration, root.currentIsLive); color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
@@ -1111,39 +1311,137 @@ Item {
                 // Deliberately outside the Row: that keeps prev/play/next
                 // centred in the panel while the save controls sit in the
                 // corners, one on each side.
-                Text {
-                  id: likeGlyph
+                Row {
+                  id: leftControls
                   anchors.verticalCenter: parent.verticalCenter
                   anchors.left: parent.left
                   anchors.leftMargin: Style.space(2)
-                  text: root.currentLiked ? "󰋑" : "󰋕"
-                  visible: root.isVideoId(root.currentVideoId)
-                  color: root.currentLiked ? root.accent : (likeArea.containsMouse ? root.ink : root.dim)
-                  font.family: Style.font.menuFamily
-                  // The three corner glyphs are sized to draw at the same ink
-                  // height (~12px next to the 11px arrows), not to the same
-                  // nominal size: each fills a different share of its em box,
-                  // so equal pixelSize renders them visibly unequal. The
-                  // multipliers come from measuring the rendered glyphs.
-                  font.pixelSize: Math.round(Style.font.iconLarge * 1.3)
+                  spacing: Style.space(10)
 
-                  // A short kick on the way in only. The heart is the one
-                  // control in this row that changes stored state rather than
-                  // playback, and the beat is its acknowledgement.
-                  onTextChanged: if (root.currentLiked) likeBeat.restart()
-                  SequentialAnimation {
-                    id: likeBeat
-                    NumberAnimation { target: likeGlyph; property: "scale"; to: 1.3; duration: 110; easing.type: Easing.OutQuad }
-                    NumberAnimation { target: likeGlyph; property: "scale"; to: 1.0; duration: 150; easing.type: Easing.OutBack }
+                  Text {
+                    id: likeGlyph
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.currentLiked ? "󰋑" : "󰋕"
+                    visible: root.isVideoId(root.currentVideoId)
+                    color: root.currentLiked ? root.accent : (likeArea.containsMouse ? root.ink : root.dim)
+                    font.family: Style.font.menuFamily
+                    // The three corner glyphs are sized to draw at the same ink
+                    // height (~12px next to the 11px arrows), not to the same
+                    // nominal size: each fills a different share of its em box,
+                    // so equal pixelSize renders them visibly unequal. The
+                    // multipliers come from measuring the rendered glyphs.
+                    font.pixelSize: Math.round(Style.font.iconLarge * 1.3)
+
+                    // A short kick on the way in only. The heart is the one
+                    // control in this row that changes stored state rather than
+                    // playback, and the beat is its acknowledgement.
+                    onTextChanged: if (root.currentLiked) likeBeat.restart()
+                    SequentialAnimation {
+                      id: likeBeat
+                      NumberAnimation { target: likeGlyph; property: "scale"; to: 1.3; duration: 110; easing.type: Easing.OutQuad }
+                      NumberAnimation { target: likeGlyph; property: "scale"; to: 1.0; duration: 150; easing.type: Easing.OutBack }
+                    }
+
+                    MouseArea {
+                      id: likeArea
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(8)
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.toggleLike()
+                    }
+
+                    PanelToolTip {
+                      visible: likeArea.containsMouse
+                      text: root.currentLiked ? "Remove from Liked songs" : "Add to Liked songs"
+                    }
                   }
 
-                  MouseArea {
-                    id: likeArea
-                    anchors.fill: parent
-                    anchors.margins: -Style.space(8)
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.toggleLike()
+                  // The slider stays folded behind the speaker until it is
+                  // wanted: at this width a permanent one would crowd the
+                  // transport row, and volume is set far less often than it is
+                  // glanced at.
+                  Item {
+                    id: volumeControl
+                    anchors.verticalCenter: parent.verticalCenter
+                    readonly property bool open: volumeArea.containsMouse || volumeSliderArea.containsMouse || volumeSliderArea.pressed
+                    width: volumeGlyph.width + (open ? Style.space(6) + volumeSlider.width : 0)
+                    height: Style.space(20)
+                    clip: true
+                    Behavior on width { NumberAnimation { duration: 130; easing.type: Easing.OutCubic } }
+
+                    Text {
+                      id: volumeGlyph
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.left: parent.left
+                      text: root.volume === 0 ? "󰝟" : (root.volume < 34 ? "󰕿" : (root.volume < 67 ? "󰖀" : "󰕾"))
+                      color: root.volume === 0 ? root.accent : (volumeControl.open ? root.ink : root.dim)
+                      font.family: Style.font.menuFamily
+                      // Same measured-ink sizing as the other corner glyphs.
+                      font.pixelSize: Math.round(Style.font.iconLarge * 1.15)
+
+                      MouseArea {
+                        id: volumeArea
+                        anchors.fill: parent
+                        anchors.margins: -Style.space(6)
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.toggleMute()
+                        // The wheel is what people try on a speaker icon before
+                        // they find the slider.
+                        onWheel: function(wheel) { root.setVolume(root.volume + (wheel.angleDelta.y > 0 ? 5 : -5)) }
+                      }
+
+                      PanelToolTip {
+                        visible: volumeArea.containsMouse
+                        text: root.volume === 0 ? "Unmute" : "Volume " + root.volume + "%"
+                      }
+                    }
+
+                    Item {
+                      id: volumeSlider
+                      anchors.left: volumeGlyph.right
+                      anchors.leftMargin: Style.space(6)
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(46)
+                      height: parent.height
+                      opacity: volumeControl.open ? 1 : 0
+                      Behavior on opacity { NumberAnimation { duration: 110 } }
+
+                      Rectangle {
+                        id: volumeTrack
+                        width: parent.width
+                        height: Style.space(3)
+                        radius: height / 2
+                        color: "#555555"
+                        anchors.verticalCenter: parent.verticalCenter
+                        Rectangle {
+                          width: parent.width * (root.volume / 100)
+                          height: parent.height
+                          radius: height / 2
+                          color: root.accent
+                        }
+                      }
+
+                      Rectangle {
+                        width: Style.space(8)
+                        height: width
+                        radius: width / 2
+                        color: root.accent
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: volumeTrack.width * (root.volume / 100) - width / 2
+                      }
+
+                      MouseArea {
+                        id: volumeSliderArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onPressed: function(mouse) { root.setVolume(mouse.x / width * 100) }
+                        onPositionChanged: function(mouse) { if (pressed) root.setVolume(mouse.x / width * 100) }
+                        onWheel: function(wheel) { root.setVolume(root.volume + (wheel.angleDelta.y > 0 ? 5 : -5)) }
+                      }
+                    }
                   }
                 }
 
@@ -1174,6 +1472,8 @@ Item {
                       cursorShape: Qt.PointingHandCursor
                       onClicked: root.openPicker()
                     }
+
+                    PanelToolTip { visible: saveArea.containsMouse; text: "Save to playlist" }
                   }
 
                   Text {
@@ -1203,12 +1503,21 @@ Item {
                       cursorShape: Qt.PointingHandCursor
                       onClicked: root.startMix(root.currentVideoId)
                     }
+
+                    // The one glyph in the panel nobody reads on sight.
+                    PanelToolTip {
+                      visible: mixArea.containsMouse
+                      text: root.mixLoading ? "Building mix…" : "Start radio from this song"
+                    }
                   }
                 }
               }
 
               Rectangle { width: parent.width; height: 1; color: "#343434" }
-              Text { text: (root.mixLoading || root.mixPrefetching) ? "Building mix…" : "Up next"; color: root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
+              // Not "Up next": the track on air stays in this list, with the
+              // ones already played dimmed above it, so the heading has to name
+              // the whole queue rather than what follows.
+              Text { text: (root.mixLoading || root.mixPrefetching) ? "Building mix…" : "Queue"; color: root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: true }
 
               ListView {
                 id: upNextList
@@ -1794,7 +2103,8 @@ Item {
         spacing: Style.space(2)
         Text {
           width: parent.width
-          text: String(savedRow.modelData.title || "Untitled")
+          textFormat: Text.StyledText
+          text: root.trackMarkup(savedRow.modelData.title || "Untitled", savedRow.modelData.artist, root.dim)
           color: savedRow.modelData.videoId === root.currentVideoId ? root.accent : root.ink
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.bodySmall
@@ -1956,7 +2266,16 @@ Item {
         width: parent.width - (expanded ? Style.space(113) : Style.space(103))
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(2)
-        Text { width: parent.width; text: trackRow.title; color: trackRow.index === root.currentIndex ? root.accent : root.ink; font.family: Style.font.menuFamily; font.pixelSize: Style.font.bodySmall; font.bold: trackRow.index === root.currentIndex; elide: Text.ElideRight }
+        Text {
+          width: parent.width
+          textFormat: Text.StyledText
+          text: root.trackMarkup(trackRow.title, trackRow.artist, root.dim)
+          color: trackRow.index === root.currentIndex ? root.accent : root.ink
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: trackRow.index === root.currentIndex
+          elide: Text.ElideRight
+        }
         Text { width: parent.width; text: trackRow.artist; color: root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
       }
 
@@ -1981,6 +2300,8 @@ Item {
           cursorShape: Qt.PointingHandCursor
           onClicked: root.startMix(trackRow.videoId)
         }
+
+        PanelToolTip { visible: rowMixArea.containsMouse; text: "Start radio from this song" }
       }
 
       Text { width: Style.space(38); text: root.durationLabel(trackRow.duration, trackRow.isLive); color: trackRow.isLive ? root.accent : root.muted; font.family: Style.font.menuFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight; anchors.verticalCenter: parent.verticalCenter }

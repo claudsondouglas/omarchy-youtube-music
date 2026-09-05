@@ -16,6 +16,10 @@ mkdir -p "$runtime_dir"
 # reboot.
 data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-youtube-music"
 playlists_file="$data_dir/playlists.json"
+# Volume is a preference too. Every track starts its own mpv, so without a
+# stored value the level would snap back to the default on each song while the
+# slider still showed what the user had picked.
+volume_file="$data_dir/volume"
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -27,6 +31,14 @@ require() {
 ipc() {
   [[ -S "$socket" ]] || return 1
   printf '%s\n' "$1" | socat -T 0.4 - "UNIX-CONNECT:$socket" 2>/dev/null
+}
+
+stored_volume() {
+  local value=""
+  [[ -r "$volume_file" ]] && value="$(<"$volume_file")"
+  [[ "$value" =~ ^[0-9]+$ ]] || value=70
+  (( value > 100 )) && value=100
+  printf '%s' "$value"
 }
 
 # "Liked songs" is built in: it is created on first access and playlist-delete
@@ -109,7 +121,7 @@ launch_url() {
 
   rm -f -- "$socket"
   mpv --no-video --force-window=no --input-ipc-server="$socket" \
-    --ytdl-format=bestaudio/best --volume=70 --title='YouTube Music' \
+    --ytdl-format=bestaudio/best --volume="$(stored_volume)" --title='YouTube Music' \
     "$url" >/dev/null 2>&1 &
   mpv_pid=$!
   printf '%s\n' "$mpv_pid" >"$pid_file"
@@ -271,14 +283,23 @@ case "${1:-}" in
   seek)
     require socat
     seconds="${2:-0}"
+    # `absolute` is what clicking the progress bar needs; `relative` stays the
+    # default so the previous single-argument form keeps working.
+    mode="${3:-relative}"
     [[ "$seconds" =~ ^-?[0-9]+$ ]] || exit 2
-    ipc "{\"command\":[\"seek\",$seconds,\"relative\"]}" >/dev/null
+    [[ "$mode" == "relative" || "$mode" == "absolute" ]] || exit 2
+    ipc "{\"command\":[\"seek\",$seconds,\"$mode\"]}" >/dev/null
     ;;
   volume)
-    require socat
     value="${2:-70}"
     [[ "$value" =~ ^[0-9]+$ ]] || exit 2
     (( value > 100 )) && value=100
+    mkdir -p "$data_dir"
+    printf '%s\n' "$value" >"$volume_file"
+    # Setting the level with nothing playing is legitimate -- it is stored and
+    # applied to the next track -- so a missing socket is not an error here.
+    [[ -S "$socket" ]] || exit 0
+    require socat
     ipc "{\"command\":[\"set_property\",\"volume\",$value]}" >/dev/null
     ;;
   stop)
@@ -288,11 +309,12 @@ case "${1:-}" in
     ;;
   status)
     require jq
+    volume="$(stored_volume)"
     if [[ ! -S "$socket" ]]; then
       if [[ -s "$state_file" ]]; then
-        jq -c --slurpfile queue "$queue_file" '. + {running:false,paused:true,position:0,playbackDuration:0,queue:($queue[0] // [])}' "$state_file"
+        jq -c --slurpfile queue "$queue_file" --argjson volume "$volume" '. + {running:false,paused:true,position:0,playbackDuration:0,volume:$volume,queue:($queue[0] // [])}' "$state_file"
       else
-        jq -cn --slurpfile queue "$queue_file" '{running:false,paused:true,position:0,playbackDuration:0,queue:($queue[0] // [])}'
+        jq -cn --slurpfile queue "$queue_file" --argjson volume "$volume" '{running:false,paused:true,position:0,playbackDuration:0,volume:$volume,queue:($queue[0] // [])}'
       fi
       exit 0
     fi
@@ -300,17 +322,19 @@ case "${1:-}" in
       '{"command":["get_property","pause"],"request_id":1}' \
       '{"command":["get_property","time-pos"],"request_id":2}' \
       '{"command":["get_property","duration"],"request_id":3}' \
+      '{"command":["get_property","volume"],"request_id":4}' \
       | socat -T 0.4 - "UNIX-CONNECT:$socket" 2>/dev/null || true)"
     if [[ -s "$state_file" ]]; then
-      jq -sc --slurpfile track "$state_file" --slurpfile queue "$queue_file" '($track[0] // {}) + {
+      jq -sc --slurpfile track "$state_file" --slurpfile queue "$queue_file" --argjson volume "$volume" '($track[0] // {}) + {
         running:true,
         paused:((map(select(.request_id == 1))[0].data) // false),
         position:((map(select(.request_id == 2))[0].data) // 0),
         playbackDuration:((map(select(.request_id == 3))[0].data) // 0),
+        volume:((map(select(.request_id == 4))[0].data) // $volume),
         queue:($queue[0] // [])
       }' <<<"$responses"
     else
-      jq -sc '{running:true,paused:((map(select(.request_id == 1))[0].data)//false),position:((map(select(.request_id == 2))[0].data)//0),playbackDuration:((map(select(.request_id == 3))[0].data)//0)}' <<<"$responses"
+      jq -sc --argjson volume "$volume" '{running:true,paused:((map(select(.request_id == 1))[0].data)//false),position:((map(select(.request_id == 2))[0].data)//0),playbackDuration:((map(select(.request_id == 3))[0].data)//0),volume:((map(select(.request_id == 4))[0].data)//$volume)}' <<<"$responses"
     fi
     ;;
   playlists)
@@ -365,7 +389,7 @@ case "${1:-}" in
       '.playlists |= map(select(.id != $id or .builtin == true))'
     ;;
   *)
-    printf 'Usage: youtube-music <search QUERY|mix VIDEO_ID|queue JSON INDEX|requeue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS|volume 0-100|stop|status|playlists|playlist-create NAME [TRACK_JSON]|playlist-add ID TRACK_JSON|playlist-remove ID VIDEO_ID|playlist-delete ID>\n' >&2
+    printf 'Usage: youtube-music <search QUERY|mix VIDEO_ID|queue JSON INDEX|requeue JSON INDEX|play URL [TITLE ARTIST THUMBNAIL DURATION]|next|previous|toggle|pause|resume|seek SECONDS [relative|absolute]|volume 0-100|stop|status|playlists|playlist-create NAME [TRACK_JSON]|playlist-add ID TRACK_JSON|playlist-remove ID VIDEO_ID|playlist-delete ID>\n' >&2
     exit 2
     ;;
 esac

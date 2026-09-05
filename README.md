@@ -12,9 +12,11 @@ result queue from a native Omarchy overlay.
 - Audio-only playback through `mpv`
 - Artwork, artist, and duration in the result list
 - Play/pause, previous, and next controls
+- A progress bar you can click and drag to seek, and a volume slider that
+  remembers its level across tracks
 - Mix: an endless station built from any track, the way "Start radio" works in
   the YouTube Music app
-- Opening a song from search replaces "up next" with that song's mix
+- Opening a song from search replaces the queue with that song's mix
 - The queue plays through on its own, one track after the next
 - Playlists, including a built-in "Liked songs" fed by the heart button
 - Playlists open from the home screen and play as the queue
@@ -60,13 +62,14 @@ The loader adds these desktop shortcuts:
   else it retains Omarchy's standard Keybindings menu action.
 
 Inside the player, press Enter to search or play the selected result, use the
-arrow keys to move through results, and press Escape to close it. Click the
-artwork or track title to open the player; the compact bar controls handle
-previous, play/pause, and next.
+arrow keys to move through results, and press Escape to close it. With the
+search field closed, Space toggles playback and the left and right arrows seek
+five seconds. Click the artwork or track title to open the player; the compact
+bar controls handle previous, play/pause, and next.
 
 The `((*))` button next to the transport controls builds a mix around the track
 on air; the same button appears on each row of the list on hover. Picking a
-track from the search results does it automatically, so "up next" becomes that
+track from the search results does it automatically, so the queue becomes that
 song's mix instead of the leftover search results. Once you are in a mix you
 stay in it: it plays to the end unless you start another mix or search again.
 Tracks already played stay in the list, dimmed, so you can go back to them.
@@ -90,7 +93,9 @@ search, no mix replaces it, because the list is one you built by hand.
 
 Playlists are stored in `${XDG_DATA_HOME:-~/.local/share}/omarchy-youtube-music/playlists.json`
 and survive reboots, unlike the queue and playback state, which live in
-`XDG_RUNTIME_DIR` and go with the session.
+`XDG_RUNTIME_DIR` and go with the session. The volume sits alongside the
+playlists, in `volume`: every track starts its own `mpv`, so without a stored
+level it would snap back to the default on each song.
 
 ## Notes
 
