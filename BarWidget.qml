@@ -1,7 +1,6 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
@@ -200,56 +199,20 @@ BarWidget {
     }
   }
 
-  Variants {
-    model: root.popupOpen ? Quickshell.screens : []
-
-    delegate: Component {
-      PanelWindow {
-        id: dismissWindow
-        required property var modelData
-
-        readonly property bool containsPlayer: playerWindow.screen
-          && modelData.name === playerWindow.screen.name
-
-        screen: modelData
-        visible: root.popupOpen
-        color: "transparent"
-        exclusionMode: ExclusionMode.Ignore
-
-        WlrLayershell.namespace: "youtube-music-dismiss"
-        WlrLayershell.layer: WlrLayer.Overlay
-        WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
-
-        anchors {
-          top: true
-          bottom: true
-          left: true
-          right: true
-        }
-
-        // Keep the real player window interactive while catching every click
-        // outside it. The small inset includes the compositor-owned border.
-        mask: Region {
-          width: dismissWindow.screen ? dismissWindow.screen.width : 0
-          height: dismissWindow.screen ? dismissWindow.screen.height : 0
-
-          Region {
-            x: root.popupX - 2
-            y: root.popupY - 2
-            width: dismissWindow.containsPlayer ? root.popupWidth + 4 : 0
-            height: dismissWindow.containsPlayer ? root.popupHeight + 4 : 0
-            intersection: Intersection.Subtract
-          }
-        }
-
-        MouseArea {
-          anchors.fill: parent
-          acceptedButtons: Qt.AllButtons
-          onPressed: root.close()
-        }
-      }
-    }
-  }
+  // The click-away overlay (a full-screen Overlay-layer PanelWindow that closed
+  // the player on any click outside it) used to live here. Its cut-out was at a
+  // FIXED popupX,popupY -- the geometry of a dropdown anchored to the bar. The
+  // player itself is a real FloatingWindow, so on a floating-window setup
+  // (Hyprland with hyprbars, everything floating) two things break: dragging the
+  // window moves it out from under the hole, and the 30px title bar sits above
+  // the cut-out from the start. In both cases the click is swallowed by the
+  // overlay, which closes the player -- it reads as "the plugin closes itself".
+  //
+  // The player closes with Escape, with the title-bar button
+  // (FloatingWindow.onClosed), or with the bar icon (toggle).
+  //
+  // The Quickshell.Wayland import went with it: only the overlay used
+  // WlrLayershell.
 
   Process {
     id: actionProc
